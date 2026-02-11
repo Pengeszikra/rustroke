@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Rust WASM SVG Line Editor</title>
+  <link rel="icon" type="image/x-icon" href="favicon.ico">
   <style>
     :root {
       --ink: #0f172a;
@@ -56,6 +57,25 @@
       transition: transform 120ms ease, box-shadow 150ms ease;
     }
     button:active { transform: translateY(1px); box-shadow: 0 2px 6px rgba(14,165,233,0.3); }
+    button.active {
+      background: linear-gradient(135deg, #ff6b6b, #ee5a6f);
+      box-shadow: 0 4px 12px rgba(255, 107, 107, 0.25);
+    }
+    .tool-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      padding: 0 8px;
+      border-left: 1px solid #e2e8f0;
+      border-right: 1px solid #e2e8f0;
+    }
+    input[type="color"] {
+      width: 40px;
+      height: 36px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
     .status {
       font-size: 13px;
       padding: 8px 12px;
@@ -80,6 +100,9 @@
     #lines line { stroke: #0f172a; stroke-width: 2; stroke-linecap: round; }
     #preview { stroke: #0ea5e9; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 6 5; opacity: 0; }
     #preview.active { opacity: 0.9; }
+    #fills polygon { stroke: none; opacity: 0.7; }
+    #nearestLine { stroke: #ff6b6b; stroke-width: 1.5; stroke-dasharray: 3 3; opacity: 0; }
+    #nearestLine.active { opacity: 0.6; }
   </style>
 </head>
 <body>
@@ -88,28 +111,45 @@
     <div class="actions">
       <button id="undoBtn" type="button">Undo (Ctrl+Z)</button>
       <button id="clearBtn" type="button">Clear</button>
+      <div class="tool-group">
+        <button id="fillBtn" type="button">Fill</button>
+        <input id="fillColor" type="color" value="#747474" title="Fill color">
+      </div>
       <div class="status" id="status">Lines: 0</div>
     </div>
   </header>
 
   <svg id="canvas" viewBox="0 0 1000 700">
     <rect class="canvas-bg" x="0" y="0" width="1000" height="700" rx="12" />
+    <g id="fills"></g>
     <g id="lines"></g>
     <line id="preview" x1="0" y1="0" x2="0" y2="0" />
+    <line id="nearestLine" x1="0" y1="0" x2="0" y2="0" />
   </svg>
 
   <script type="module">
     const canvas = document.getElementById('canvas');
     const linesGroup = document.getElementById('lines');
+    const fillsGroup = document.getElementById('fills');
     const preview = document.getElementById('preview');
+    const nearestLine = document.getElementById('nearestLine');
     const undoBtn = document.getElementById('undoBtn');
     const clearBtn = document.getElementById('clearBtn');
+    const fillBtn = document.getElementById('fillBtn');
+    const fillColor = document.getElementById('fillColor');
     const statusEl = document.getElementById('status');
     const viewBox = canvas.viewBox.baseVal;
     let wasm = null;
     let dragging = false;
+    let fillMode = false;
+    /** @type {{x: number, y: number}} */
     let startPoint = { x: 0, y: 0 };
 
+    /**
+     * Convert pointer event coordinates to SVG viewBox coordinates
+     * @param {PointerEvent} evt - pointer event
+     * @returns {{x: number, y: number}} point in SVG coordinates
+     */
     function toSvgPoint(evt) {
       const rect = canvas.getBoundingClientRect();
       const x = ((evt.clientX - rect.left) / rect.width) * viewBox.width + viewBox.x;
@@ -117,6 +157,9 @@
       return { x, y };
     }
 
+    /**
+     * Render lines and fills from WASM memory
+     */
     function renderFromWasm() {
       if (!wasm) return;
       const len = wasm.editor_export_len_f32();
@@ -124,44 +167,137 @@
       if (!ptr || len === 0) {
         linesGroup.replaceChildren();
         statusEl.textContent = 'Lines: 0';
-        return;
+      } else {
+        const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+        const fragments = [];
+        for (let i = 0; i < arr.length; i += 4) {
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', arr[i + 0]);
+          line.setAttribute('y1', arr[i + 1]);
+          line.setAttribute('x2', arr[i + 2]);
+          line.setAttribute('y2', arr[i + 3]);
+          fragments.push(line);
+        }
+        linesGroup.replaceChildren(...fragments);
+        statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
       }
-      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
-      const fragments = [];
-      for (let i = 0; i < arr.length; i += 4) {
-        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-        line.setAttribute('x1', arr[i + 0]);
-        line.setAttribute('y1', arr[i + 1]);
-        line.setAttribute('x2', arr[i + 2]);
-        line.setAttribute('y2', arr[i + 3]);
-        fragments.push(line);
+
+      // Render fills
+      const fillsLen = wasm.editor_export_fills_len();
+      const fillsPtr = wasm.editor_export_fills_ptr();
+      console.log('Fill render: fillsLen=', fillsLen, 'fillsPtr=', fillsPtr);
+      if (fillsPtr && fillsLen > 0) {
+        const fillsArr = new Float32Array(wasm.memory.buffer, fillsPtr, fillsLen);
+        console.log('Fill array length:', fillsArr.length);
+        const fillFragments = [];
+        let i = 0;
+        let polygonCount = 0;
+        while (i < fillsArr.length) {
+          const pointCount = fillsArr[i];
+          const r = Math.round(fillsArr[i + 1] * 255);
+          const g = Math.round(fillsArr[i + 2] * 255);
+          const b = Math.round(fillsArr[i + 3] * 255);
+          const a = fillsArr[i + 4];
+          console.log(`Polygon ${polygonCount}: pointCount=${pointCount}, color=rgba(${r},${g},${b},${a})`);
+          i += 5;
+
+          const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+          let points = '';
+          const corners = [];
+          for (let j = 0; j < pointCount && i < fillsArr.length; j++) {
+            const x = fillsArr[i];
+            const y = fillsArr[i + 1];
+            points += `${x},${y} `;
+            corners.push(`(${x.toFixed(1)},${y.toFixed(1)})`);
+            i += 2;
+          }
+          console.log(`  Corners: ${corners.join(' -> ')}`);
+          polygon.setAttribute('points', points);
+          polygon.setAttribute('fill', `rgba(${r},${g},${b},${a})`);
+          fillFragments.push(polygon);
+          polygonCount++;
+        }
+        console.log(`Total polygons rendered: ${polygonCount}`);
+        fillsGroup.replaceChildren(...fillFragments);
+      } else {
+        console.log('No fill data to render');
+        fillsGroup.replaceChildren();
       }
-      linesGroup.replaceChildren(...fragments);
-      statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
     }
 
+    /**
+     * Handle end of drag - add line to editor
+     * @param {PointerEvent} evt
+     */
     function endDrag(evt) {
       if (!dragging || !wasm) return;
       dragging = false;
       preview.classList.remove('active');
       const end = toSvgPoint(evt);
+      console.log(`Line added: (${startPoint.x.toFixed(1)},${startPoint.y.toFixed(1)}) -> (${end.x.toFixed(1)},${end.y.toFixed(1)})`);
       wasm.editor_add_line(startPoint.x, startPoint.y, end.x, end.y);
+      console.log('Total lines now:', wasm.editor_line_count());
       renderFromWasm();
+    }
+
+    /**
+     * Encode string to WASM memory and return pointer/length
+     * Allocates from the end of memory buffer
+     * @param {string} str - string to encode
+     * @returns {{ptr: number, len: number}} memory pointer and length
+     */
+    function encodeStringToWasm(str) {
+      const buffer = new TextEncoder().encode(str);
+      const ptr = wasm.memory.buffer.byteLength - 256;
+      const view = new Uint8Array(wasm.memory.buffer, ptr, buffer.length);
+      view.set(buffer);
+      return { ptr, len: buffer.length };
     }
 
     canvas.addEventListener('pointerdown', (evt) => {
       evt.preventDefault();
       if (!wasm) return;
       canvas.setPointerCapture(evt.pointerId);
-      startPoint = toSvgPoint(evt);
-      dragging = true;
-      preview.classList.add('active');
-      preview.setAttribute('x1', startPoint.x);
-      preview.setAttribute('y1', startPoint.y);
-      preview.setAttribute('x2', startPoint.x);
-      preview.setAttribute('y2', startPoint.y);
+      const point = toSvgPoint(evt);
+
+      if (fillMode) {
+        fillMode = false;
+        fillBtn.classList.remove('active');
+        const color = fillColor.value;
+        console.log('Fill clicked at:', point, 'with color:', color);
+        const { ptr, len } = encodeStringToWasm(color);
+        wasm.editor_fill(point.x, point.y, ptr, len);
+        
+        // Log intersection points found
+        const intLen = wasm.editor_export_len_f32();
+        const intPtr = wasm.editor_export_ptr_f32();
+        if (intLen > 0) {
+          const intArr = new Float32Array(wasm.memory.buffer, intPtr, intLen);
+          const count = intArr[0];
+          console.log(`Found ${count} line intersections:`);
+          for (let i = 0; i < count; i++) {
+            const ix = intArr[1 + i * 2];
+            const iy = intArr[1 + i * 2 + 1];
+            console.log(`  Intersection ${i}: (${ix.toFixed(1)}, ${iy.toFixed(1)})`);
+          }
+        }
+        
+        renderFromWasm();
+      } else {
+        startPoint = point;
+        dragging = true;
+        preview.classList.add('active');
+        preview.setAttribute('x1', startPoint.x);
+        preview.setAttribute('y1', startPoint.y);
+        preview.setAttribute('x2', startPoint.x);
+        preview.setAttribute('y2', startPoint.y);
+      }
     });
 
+    /**
+     * Handle pointer move for line preview
+     * @param {PointerEvent} evt
+     */
     canvas.addEventListener('pointermove', (evt) => {
       if (!dragging) return;
       const pos = toSvgPoint(evt);
@@ -175,7 +311,16 @@
 
     undoBtn.addEventListener('click', () => { if (wasm) { wasm.editor_undo(); renderFromWasm(); } });
     clearBtn.addEventListener('click', () => { if (wasm) { wasm.editor_clear(); renderFromWasm(); } });
+    fillBtn.addEventListener('click', () => {
+      fillMode = !fillMode;
+      fillBtn.classList.toggle('active');
+      if (!fillMode) canvas.style.cursor = 'default';
+      else canvas.style.cursor = 'crosshair';
+    });
 
+    /**
+     * Handle undo shortcut (Ctrl+Z / Cmd+Z)
+     */
     window.addEventListener('keydown', (evt) => {
       if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === 'z') {
         evt.preventDefault();
@@ -186,6 +331,10 @@
       }
     });
 
+    /**
+     * Load and instantiate WASM module
+     * @returns {Promise<{instance: WebAssembly.Instance}>}
+     */
     async function loadWasm() {
       const response = await fetch('rust-svg-editor.wasm');
       if (WebAssembly.instantiateStreaming) {
