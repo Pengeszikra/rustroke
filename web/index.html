@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rust WASM SVG Line Editor</title>
+  <style>
+    :root {
+      --ink: #0f172a;
+      --paper: #f5f6fb;
+      --accent: #2dd4bf;
+      --accent-dark: #0ea5e9;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #f0f4ff, #fefefe);
+      color: var(--ink);
+      font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 18px;
+      gap: 14px;
+    }
+    header {
+      width: 100%;
+      max-width: 1100px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    h1 {
+      font-size: 18px;
+      letter-spacing: 0.4px;
+      margin: 0;
+      color: var(--ink);
+    }
+    .actions {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    button {
+      border: none;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #fff;
+      background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+      box-shadow: 0 4px 12px rgba(14, 165, 233, 0.25);
+      transition: transform 120ms ease, box-shadow 150ms ease;
+    }
+    button:active { transform: translateY(1px); box-shadow: 0 2px 6px rgba(14,165,233,0.3); }
+    .status {
+      font-size: 13px;
+      padding: 8px 12px;
+      border-radius: 8px;
+      background: #e2e8f0;
+      color: #334155;
+    }
+    svg {
+      width: 100%;
+      max-width: 1100px;
+      aspect-ratio: 1000 / 700;
+      border-radius: 16px;
+      background: #fff;
+      box-shadow: 0 16px 50px rgba(15, 23, 42, 0.14);
+      touch-action: none;
+    }
+    .canvas-bg {
+      fill: #f8fafc;
+      stroke: #e2e8f0;
+      stroke-width: 1.5;
+    }
+    #lines line { stroke: #0f172a; stroke-width: 2; stroke-linecap: round; }
+    #preview { stroke: #0ea5e9; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 6 5; opacity: 0; }
+    #preview.active { opacity: 0.9; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Rust → WASM SVG Lines</h1>
+    <div class="actions">
+      <button id="undoBtn" type="button">Undo (Ctrl+Z)</button>
+      <button id="clearBtn" type="button">Clear</button>
+      <div class="status" id="status">Lines: 0</div>
+    </div>
+  </header>
+
+  <svg id="canvas" viewBox="0 0 1000 700">
+    <rect class="canvas-bg" x="0" y="0" width="1000" height="700" rx="12" />
+    <g id="lines"></g>
+    <line id="preview" x1="0" y1="0" x2="0" y2="0" />
+  </svg>
+
+  <script type="module">
+    const canvas = document.getElementById('canvas');
+    const linesGroup = document.getElementById('lines');
+    const preview = document.getElementById('preview');
+    const undoBtn = document.getElementById('undoBtn');
+    const clearBtn = document.getElementById('clearBtn');
+    const statusEl = document.getElementById('status');
+    const viewBox = canvas.viewBox.baseVal;
+    let wasm = null;
+    let dragging = false;
+    let startPoint = { x: 0, y: 0 };
+
+    function toSvgPoint(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const x = ((evt.clientX - rect.left) / rect.width) * viewBox.width + viewBox.x;
+      const y = ((evt.clientY - rect.top) / rect.height) * viewBox.height + viewBox.y;
+      return { x, y };
+    }
+
+    function renderFromWasm() {
+      if (!wasm) return;
+      const len = wasm.editor_export_len_f32();
+      const ptr = wasm.editor_export_ptr_f32();
+      if (!ptr || len === 0) {
+        linesGroup.replaceChildren();
+        statusEl.textContent = 'Lines: 0';
+        return;
+      }
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      const fragments = [];
+      for (let i = 0; i < arr.length; i += 4) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', arr[i + 0]);
+        line.setAttribute('y1', arr[i + 1]);
+        line.setAttribute('x2', arr[i + 2]);
+        line.setAttribute('y2', arr[i + 3]);
+        fragments.push(line);
+      }
+      linesGroup.replaceChildren(...fragments);
+      statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
+    }
+
+    function endDrag(evt) {
+      if (!dragging || !wasm) return;
+      dragging = false;
+      preview.classList.remove('active');
+      const end = toSvgPoint(evt);
+      wasm.editor_add_line(startPoint.x, startPoint.y, end.x, end.y);
+      renderFromWasm();
+    }
+
+    canvas.addEventListener('pointerdown', (evt) => {
+      evt.preventDefault();
+      if (!wasm) return;
+      canvas.setPointerCapture(evt.pointerId);
+      startPoint = toSvgPoint(evt);
+      dragging = true;
+      preview.classList.add('active');
+      preview.setAttribute('x1', startPoint.x);
+      preview.setAttribute('y1', startPoint.y);
+      preview.setAttribute('x2', startPoint.x);
+      preview.setAttribute('y2', startPoint.y);
+    });
+
+    canvas.addEventListener('pointermove', (evt) => {
+      if (!dragging) return;
+      const pos = toSvgPoint(evt);
+      preview.setAttribute('x2', pos.x);
+      preview.setAttribute('y2', pos.y);
+    });
+
+    canvas.addEventListener('pointerup', endDrag);
+    canvas.addEventListener('pointercancel', () => { dragging = false; preview.classList.remove('active'); });
+    canvas.addEventListener('pointerleave', () => { dragging = false; preview.classList.remove('active'); });
+
+    undoBtn.addEventListener('click', () => { if (wasm) { wasm.editor_undo(); renderFromWasm(); } });
+    clearBtn.addEventListener('click', () => { if (wasm) { wasm.editor_clear(); renderFromWasm(); } });
+
+    window.addEventListener('keydown', (evt) => {
+      if ((evt.ctrlKey || evt.metaKey) && evt.key.toLowerCase() === 'z') {
+        evt.preventDefault();
+        if (wasm) {
+          wasm.editor_undo();
+          renderFromWasm();
+        }
+      }
+    });
+
+    async function loadWasm() {
+      const response = await fetch('rust-svg-editor.wasm');
+      if (WebAssembly.instantiateStreaming) {
+        try {
+          return await WebAssembly.instantiateStreaming(response);
+        } catch (_) {
+          // fallback below
+        }
+      }
+      const buffer = await response.arrayBuffer();
+      return WebAssembly.instantiate(buffer);
+    }
+
+    (async () => {
+      const { instance } = await loadWasm();
+      wasm = instance.exports;
+      wasm.editor_init();
+      renderFromWasm();
+    })();
+  </script>
+
+  <!-- Build & Run
+    rustup target add wasm32-unknown-unknown
+    cargo build --release --target wasm32-unknown-unknown
+    cp target/wasm32-unknown-unknown/release/rust-svg-editor.wasm web/
+    cd web && python -m http.server 8080
+    open http://localhost:8080
+  -->
+</body>
+</html>

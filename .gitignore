@@ -1,0 +1,5 @@
+target/
+web/rust-svg-editor.wasm
+.DS_Store
+*.log
+node_modules/
