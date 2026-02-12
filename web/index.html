@@ -314,16 +314,18 @@
      * @param {PointerEvent} evt
      */
     canvas.addEventListener('pointermove', (evt) => {
-      if (!dragging) return;
       const pos = toSvgPoint(evt);
-      preview.setAttribute('x2', pos.x);
-      preview.setAttribute('y2', pos.y);
-
-      // Update debug overlay on mousemove if enabled
+      
+      // Update debug overlay anytime if enabled (not just during drawing)
       if (debugMode && wasm) {
         wasm.editor_nearest(pos.x, pos.y);
         updateDebugOverlay(pos.x, pos.y);
       }
+      
+      // Only update preview if actively drawing
+      if (!dragging) return;
+      preview.setAttribute('x2', pos.x);
+      preview.setAttribute('y2', pos.y);
     });
 
     /**
