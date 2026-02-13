@@ -64,12 +64,12 @@
     }
     #lines line {
       stroke: var(--ink);
-      stroke-width: 2;
+      stroke-width: 1;
       stroke-linecap: round;
     }
     #preview {
       stroke: var(--accent);
-      stroke-width: 2;
+      stroke-width: 1;
       stroke-dasharray: 5,5;
       opacity: 0.6;
       display: none;
@@ -142,16 +142,17 @@
         <button id="clearBtn" title="Clear">Clear</button>
         <button id="fillBtn" title="Fill Region">Fill</button>
         <input id="fillColor" type="color" value="#747474" title="Fill color">
+        <button id="addFrameBtn" title="Add rectangular frame border">Frame</button>
         <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
-        <button id="graphDebugBtn" title="Toggle Graph Debug">Graph Debug</button>
+        <button id="graphDebugBtn" title="Toggle Graph Debug">Graph</button>
         <button id="toggleLinesBtn" title="Toggle Lines Visibility">Hide Lines</button>
         <span style="border-left: 2px solid #ccc; margin: 0 5px;"></span>
         <button id="recordBtn" title="Start Recording">Record</button>
         <button id="stopBtn" title="Stop Recording/Playback" disabled>Stop</button>
         <button id="playBtn" title="Play Recording" disabled>Play</button>
         <button id="clearRecordBtn" title="Clear Recording" disabled>Clear Rec</button>
-        <button id="exportBtn" title="Copy Recording JSON" disabled>Export</button>
-        <button id="importBtn" title="Import Recording JSON">Import</button>
+        <button id="exportBtn" title="Copy Recording JSON" disabled style="display: none;">Export</button>
+        <button id="importBtn" title="Import Recording JSON" style="display: none;">Import</button>
       </div>
     </header>
 
@@ -187,6 +188,7 @@
     const clearBtn = document.getElementById('clearBtn');
     const fillBtn = document.getElementById('fillBtn');
     const fillColor = document.getElementById('fillColor');
+    const addFrameBtn = document.getElementById('addFrameBtn');
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
@@ -267,6 +269,19 @@
             wasm.editor_add_line(x1, y1, x2, y2);
             renderFromWasm();
           }
+          break;
+        }
+        case "AddFrame": {
+          const {corners} = action.data;
+          // corners = [{x, y}, {x, y}, {x, y}, {x, y}] (4 corners in clockwise order)
+          // Use the WASM add_frame function which handles grouped undo
+          wasm.editor_add_frame(
+            corners[0].x, corners[0].y,
+            corners[1].x, corners[1].y,
+            corners[2].x, corners[2].y,
+            corners[3].x, corners[3].y
+          );
+          renderFromWasm();
           break;
         }
         case "Fill": {
@@ -1151,8 +1166,7 @@
       const point = toSvgPoint(evt);
 
       if (fillMode) {
-        fillMode = false;
-        fillBtn.classList.remove('active');
+        // Stay in fill mode after filling
         
         // Use dispatcher for fill action (handles debug rendering internally)
         dispatch({
@@ -1290,6 +1304,12 @@
           data: {color: fillColor.value}
         }, {source: "user"});
       }
+      // Auto-enable fill mode when color is changed
+      if (!fillMode) {
+        fillMode = true;
+        fillBtn.classList.add('active');
+        canvas.style.cursor = 'crosshair';
+      }
     });
 
     debugBtn.addEventListener('click', () => {
@@ -1326,6 +1346,32 @@
       if (wasm) {
         dispatch({type: "Clear", data: {}}, {source: "user"});
       }
+    });
+
+    addFrameBtn.addEventListener('click', () => {
+      if (!wasm) return;
+      
+      // Use full viewBox dimensions (0,0 to maxX, maxY)
+      const minX = viewBox.x;
+      const minY = viewBox.y;
+      const maxX = viewBox.x + viewBox.width;
+      const maxY = viewBox.y + viewBox.height;
+      
+      // Create 4 corners at exact viewBox boundaries (clockwise)
+      const worldCorners = [
+        {x: minX, y: minY},  // top-left
+        {x: maxX, y: minY},  // top-right
+        {x: maxX, y: maxY},  // bottom-right
+        {x: minX, y: maxY}   // bottom-left
+      ];
+      
+      // Dispatch AddFrame action
+      dispatch({
+        type: "AddFrame",
+        data: {corners: worldCorners}
+      }, {source: "user"});
+      
+      console.log('[Frame] Added frame at viewBox boundaries', worldCorners);
     });
 
     // Recording controls

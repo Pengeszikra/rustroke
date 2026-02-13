@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "createdAt": 1707843500000,
+  "events": [
+    {
+      "t": 0,
+      "type": "AddFrame",
+      "data": {
+        "corners": [
+          {"x": 0, "y": 0},
+          {"x": 800, "y": 0},
+          {"x": 800, "y": 600},
+          {"x": 0, "y": 600}
+        ]
+      }
+    },
+    {"t": 1000, "type": "AddLine", "data": {"x1": 200, "y1": 200, "x2": 400, "y2": 200}},
+    {"t": 1300, "type": "AddLine", "data": {"x1": 400, "y1": 200, "x2": 300, "y2": 350}},
+    {"t": 1600, "type": "AddLine", "data": {"x1": 300, "y1": 350, "x2": 200, "y2": 200}},
+    {"t": 2100, "type": "SetFillColor", "data": {"color": "#ff6b6b"}},
+    {"t": 2300, "type": "Fill", "data": {"x": 300, "y": 250, "color": "#ff6b6b"}},
+    {"t": 3100, "type": "AddLine", "data": {"x1": 500, "y1": 300, "x2": 600, "y2": 300}},
+    {"t": 3400, "type": "AddLine", "data": {"x1": 600, "y1": 300, "x2": 600, "y2": 400}},
+    {"t": 3700, "type": "AddLine", "data": {"x1": 600, "y1": 400, "x2": 500, "y2": 400}},
+    {"t": 4000, "type": "AddLine", "data": {"x1": 500, "y1": 400, "x2": 500, "y2": 300}},
+    {"t": 4500, "type": "SetFillColor", "data": {"color": "#4ecdc4"}},
+    {"t": 4700, "type": "Fill", "data": {"x": 550, "y": 350, "color": "#4ecdc4"}}
+  ]
+}

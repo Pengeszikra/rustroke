@@ -228,6 +228,7 @@ impl Polygon {
 enum Command {
     Add,
     AddFill,
+    AddFrame, // Grouped undo for 4 frame lines
     Clear(Vec<Line>, Vec<Polygon>),
 }
 
@@ -1930,6 +1931,21 @@ impl Editor {
         self.build_fill_graph();
     }
 
+    fn add_frame(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, x4: f32, y4: f32) {
+        // Add 4 lines forming a rectangle frame
+        // Corners in clockwise order: (x1,y1), (x2,y2), (x3,y3), (x4,y4)
+        self.lines.push(Line { x1, y1, x2, y2 }); // top
+        self.lines.push(Line { x1: x2, y1: y2, x2: x3, y2: y3 }); // right
+        self.lines.push(Line { x1: x3, y1: y3, x2: x4, y2: y4 }); // bottom
+        self.lines.push(Line { x1: x4, y1: y4, x2: x1, y2: y1 }); // left
+        
+        // Push single grouped undo command
+        self.history.push(Command::AddFrame);
+        self.refresh_export();
+        self.recompute_intersections();
+        self.build_fill_graph();
+    }
+
     fn clear(&mut self) {
         let previous_lines = self.lines.clone();
         let previous_fills = self.fills.clone();
@@ -1949,6 +1965,12 @@ impl Editor {
             }
             Some(Command::AddFill) => {
                 self.fills.pop();
+            }
+            Some(Command::AddFrame) => {
+                // Remove last 4 lines (frame is always 4 lines added together)
+                for _ in 0..4 {
+                    self.lines.pop();
+                }
             }
             Some(Command::Clear(previous_lines, previous_fills)) => {
                 self.lines = previous_lines;
@@ -2076,6 +2098,13 @@ pub extern "C" fn editor_init() {
 pub extern "C" fn editor_add_line(x1: f32, y1: f32, x2: f32, y2: f32) {
     if let Some(editor) = editor_mut() {
         editor.add_line(Line { x1, y1, x2, y2 });
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn editor_add_frame(x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32, x4: f32, y4: f32) {
+    if let Some(editor) = editor_mut() {
+        editor.add_frame(x1, y1, x2, y2, x3, y3, x4, y4);
     }
 }
 
