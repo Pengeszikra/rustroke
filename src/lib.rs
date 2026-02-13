@@ -73,7 +73,6 @@ const TOLERANCE: f32 = 10.0;
 const SNAP_EPS: f32 = 0.25; // Grid snap for intersection deduplication
 #[allow(dead_code)]
 const MAX_TRACE_STEPS: u32 = 2048;
-const TAU: f32 = PI * 2.0;
 const GAP_RADIUS: f32 = 12.0;
 const MIN_AREA: f32 = 50.0;
 const FRAC_3_PI_4: f32 = PI * 0.75;
@@ -562,10 +561,15 @@ enum SideRule {
 struct StepCandidateDebug {
     next: u32,
     turn: f32,
-    is_dead: bool,
+    abs_turn: f32,
+    out_x: f32,
+    out_y: f32,
     is_virtual: bool,
+    accepted_side: bool,
     was_visited: bool,
     chosen: bool,
+    len: f32,
+    mid_dist: f32,
 }
 
 #[derive(Clone)]
@@ -1053,86 +1057,82 @@ impl Editor {
     }
 
     fn trace_face_side(
-        &self,
+        &mut self,
         start_from: u32,
         start_to: u32,
         side_rule: SideRule,
-        _origin: (f32, f32),
+        origin: (f32, f32),
         gap_radius: f32,
     ) -> TraceResult {
         #[derive(Clone)]
         struct TraceCandidate {
             next: u32,
             turn: f32,
-            is_dead: bool,
+            abs_turn: f32,
+            out_x: f32,
+            out_y: f32,
             is_virtual: bool,
             visited: bool,
             he_idx: Option<u32>,
+            seg_id: Option<u32>,
+            len: f32,
+            mid_dist: f32,
             dist2: f32,
+            accepted_side: bool,
         }
 
-        fn pick_candidate(cands: &[TraceCandidate], side_rule: SideRule) -> Option<usize> {
-            if cands.is_empty() {
+        #[derive(Clone, Copy, PartialEq)]
+        struct EdgeKey {
+            from: u32,
+            to: u32,
+            seg: Option<u32>,
+            is_virtual: bool,
+        }
+
+        const ANG_EPS: f32 = 1e-3;
+
+        fn pick_candidate_idx(cands: &[TraceCandidate], indices: &[usize]) -> Option<usize> {
+            if indices.is_empty() {
                 return None;
             }
-
-            let mut best_idx = 0usize;
-            for (i, cand) in cands.iter().enumerate().skip(1) {
-                let best = &cands[best_idx];
-                let better = match side_rule {
-                    SideRule::KeepLeft => {
-                        if cand.turn + 1e-6 < best.turn {
-                            true
-                        } else if absf(cand.turn - best.turn) <= 1e-6 {
-                            if cand.dist2 + 1e-4 < best.dist2 {
-                                true
-                            } else if absf(cand.dist2 - best.dist2) <= 1e-4 {
-                                if cand.next < best.next {
-                                    true
-                                } else if cand.next == best.next {
-                                    cand.he_idx < best.he_idx
-                                } else {
-                                    false
+            let mut best = indices[0];
+            for &idx in indices.iter().skip(1) {
+                let cand = &cands[idx];
+                let best_cand = &cands[best];
+                let mut better = false;
+                if cand.abs_turn + 1e-6 < best_cand.abs_turn {
+                    better = true;
+                } else if absf(cand.abs_turn - best_cand.abs_turn) <= 1e-6 {
+                    if !cand.is_virtual && best_cand.is_virtual {
+                        better = true;
+                    } else if cand.is_virtual == best_cand.is_virtual {
+                        if cand.len + 1e-4 < best_cand.len {
+                            better = true;
+                        } else if absf(cand.len - best_cand.len) <= 1e-4 {
+                            if cand.mid_dist + 1e-4 < best_cand.mid_dist {
+                                better = true;
+                            } else if absf(cand.mid_dist - best_cand.mid_dist) <= 1e-4 {
+                                if cand.next < best_cand.next {
+                                    better = true;
+                                } else if cand.next == best_cand.next {
+                                    let cand_he = cand.he_idx.unwrap_or(u32::MAX);
+                                    let best_he = best_cand.he_idx.unwrap_or(u32::MAX);
+                                    if cand_he < best_he {
+                                        better = true;
+                                    }
                                 }
-                            } else {
-                                false
                             }
-                        } else {
-                            false
                         }
                     }
-                    SideRule::KeepRight => {
-                        if cand.turn > best.turn + 1e-6 {
-                            true
-                        } else if absf(cand.turn - best.turn) <= 1e-6 {
-                            if cand.dist2 + 1e-4 < best.dist2 {
-                                true
-                            } else if absf(cand.dist2 - best.dist2) <= 1e-4 {
-                                if cand.next < best.next {
-                                    true
-                                } else if cand.next == best.next {
-                                    cand.he_idx < best.he_idx
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    }
-                };
-
+                }
                 if better {
-                    best_idx = i;
+                    best = idx;
                 }
             }
-
-            Some(best_idx)
+            Some(best)
         }
 
-        fn turn_angle(
+        fn turn_angle_signed(
             vinx: f32,
             viny: f32,
             vinlen: f32,
@@ -1141,19 +1141,37 @@ impl Editor {
             voutlen: f32,
         ) -> f32 {
             if vinlen < 1e-6 || voutlen < 1e-6 {
-                return TAU;
+                return 0.0;
             }
             let dotp = vinx * voutx + viny * vouty;
             let crossp = vinx * vouty - viny * voutx;
-            let mut a = atan2_approx(crossp, dotp);
-            if a < 0.0 {
-                a += TAU;
+            atan2_approx(crossp, dotp)
+        }
+
+        fn edge_visited(visited: &[EdgeKey], key: EdgeKey) -> bool {
+            for e in visited.iter() {
+                if *e == key {
+                    return true;
+                }
             }
-            a
+            false
+        }
+
+        fn find_segment_id(graph: &FillGraph, from: u32, to: u32) -> Option<u32> {
+            if (from as usize) >= graph.node_sectors.len() {
+                return None;
+            }
+            for sid in graph.node_sectors[from as usize].iter() {
+                let seg = graph.segments[*sid as usize];
+                if (seg.a == from && seg.b == to) || (seg.b == from && seg.a == to) {
+                    return Some(*sid);
+                }
+            }
+            None
         }
 
         let mut boundary_points: Vec<(f32, f32)> = Vec::new();
-        let mut visited_edges: Vec<(u32, u32)> = Vec::new();
+        let mut visited_edges: Vec<EdgeKey> = Vec::new();
         let mut step_debug: Vec<StepDebug> = Vec::new();
 
         if (start_from as usize) >= self.fill_graph.nodes.len()
@@ -1164,18 +1182,23 @@ impl Editor {
 
         let mut cur_node = start_to;
         let mut prev_node = start_from;
-
-        visited_edges.push((prev_node, cur_node));
         let cur_pt = self.fill_graph.nodes[cur_node as usize];
         boundary_points.push((cur_pt.x, cur_pt.y));
 
+        let start_seg = find_segment_id(&self.fill_graph, start_from, start_to);
+        let start_edge = EdgeKey {
+            from: start_from,
+            to: start_to,
+            seg: start_seg,
+            is_virtual: false,
+        };
+        visited_edges.push(start_edge);
+
         let max_steps = core::cmp::max(
             8,
-            (self.fill_graph.segments.len() as u32) * 2
-                + (self.fill_graph.nodes.len() as u32),
+            (self.fill_graph.segments.len() as u32) * 3 + 20,
         );
         let mut step_idx = 0u32;
-
         let gap_r2 = gap_radius * gap_radius;
 
         loop {
@@ -1187,20 +1210,23 @@ impl Editor {
             let prev_pt = self.fill_graph.nodes[prev_node as usize];
             let (vinx, viny, vinlen) = normalize_with_len(cur_pt.x - prev_pt.x, cur_pt.y - prev_pt.y);
 
-            let mut candidates: Vec<TraceCandidate> = Vec::new();
+            let mut usable: Vec<TraceCandidate> = Vec::new();
 
-            // Actual edges
             if (cur_node as usize) < self.fill_graph.outgoing.len() {
                 for he_idx in self.fill_graph.outgoing[cur_node as usize].iter() {
                     let he = self.fill_graph.half_edges[*he_idx as usize];
                     let next_node = he.to;
                     if next_node == prev_node {
-                        continue; // no immediate backtrack
+                        continue;
                     }
                     let next_pt = self.fill_graph.nodes[next_node as usize];
                     let (voutx, vouty, voutlen) =
                         normalize_with_len(next_pt.x - cur_pt.x, next_pt.y - cur_pt.y);
-                    let turn = turn_angle(vinx, viny, vinlen, voutx, vouty, voutlen);
+                    if voutlen < 1e-6 {
+                        continue;
+                    }
+                    let turn = turn_angle_signed(vinx, viny, vinlen, voutx, vouty, voutlen);
+                    let abs_turn = absf(turn);
                     let eff_deg = if (next_node as usize) < self.effective_degree.len() {
                         self.effective_degree[next_node as usize]
                     } else {
@@ -1211,36 +1237,52 @@ impl Editor {
                     } else {
                         true
                     };
-                    let is_dead = eff_deg <= 1 || !allow;
-                    let visited = visited_edges.iter().any(|e| *e == (cur_node, next_node));
-                    candidates.push(TraceCandidate {
+                    if eff_deg <= 1 || !allow {
+                        continue;
+                    }
+                    let len = sqrt_approx(distance_sq(cur_pt.x, cur_pt.y, next_pt.x, next_pt.y));
+                    if len < 1e-6 {
+                        continue;
+                    }
+                    let midx = (cur_pt.x + next_pt.x) * 0.5;
+                    let midy = (cur_pt.y + next_pt.y) * 0.5;
+                    let mid_dist = sqrt_approx(distance_sq(origin.0, origin.1, midx, midy));
+                    let accepted_side = match side_rule {
+                        SideRule::KeepLeft => turn > ANG_EPS,
+                        SideRule::KeepRight => turn < -ANG_EPS,
+                    };
+                    let key = EdgeKey {
+                        from: cur_node,
+                        to: next_node,
+                        seg: Some(he.seg),
+                        is_virtual: false,
+                    };
+                    let already = edge_visited(&visited_edges, key);
+                    let is_closure_edge = key == start_edge;
+                    if already && !is_closure_edge {
+                        continue;
+                    }
+                    usable.push(TraceCandidate {
                         next: next_node,
                         turn,
-                        is_dead,
+                        abs_turn,
+                        out_x: voutx,
+                        out_y: vouty,
                         is_virtual: false,
-                        visited,
+                        visited: already,
                         he_idx: Some(*he_idx),
-                        dist2: distance_sq(cur_pt.x, cur_pt.y, next_pt.x, next_pt.y),
+                        seg_id: Some(he.seg),
+                        len,
+                        mid_dist,
+                        dist2: len * len,
+                        accepted_side,
                     });
                 }
             }
 
-            let mut usable: Vec<TraceCandidate> = Vec::new();
-            for c in candidates.iter() {
-                let is_closure_edge = cur_node == start_from && c.next == start_to;
-                if c.visited && !is_closure_edge {
-                    continue;
-                }
-                if c.is_dead {
-                    continue;
-                }
-                usable.push(c.clone());
-            }
-
-            // Gap bridge if nothing usable
             if usable.is_empty() {
                 let mut gap_candidates: Vec<TraceCandidate> = Vec::new();
-                let mut best_gap_dist = f32::INFINITY;
+                let mut best_dist = f32::INFINITY;
                 for (nid, node) in self.fill_graph.nodes.iter().enumerate() {
                     let nid_u = nid as u32;
                     if nid_u == cur_node || nid_u == prev_node {
@@ -1264,30 +1306,52 @@ impl Editor {
                     if dist2 > gap_r2 {
                         continue;
                     }
-                    if dist2 + 1e-3 < best_gap_dist {
-                        best_gap_dist = dist2;
+                    if dist2 < best_dist {
+                        best_dist = dist2;
                     }
                     let (voutx, vouty, voutlen) = normalize_with_len(dx, dy);
-                    let turn = turn_angle(vinx, viny, vinlen, voutx, vouty, voutlen);
-                    let visited = visited_edges.iter().any(|e| *e == (cur_node, nid_u));
+                    if voutlen < 1e-6 {
+                        continue;
+                    }
+                    let turn = turn_angle_signed(vinx, viny, vinlen, voutx, vouty, voutlen);
+                    let abs_turn = absf(turn);
+                    let accepted_side = match side_rule {
+                        SideRule::KeepLeft => turn > ANG_EPS,
+                        SideRule::KeepRight => turn < -ANG_EPS,
+                    };
+                    let key = EdgeKey {
+                        from: cur_node,
+                        to: nid_u,
+                        seg: None,
+                        is_virtual: true,
+                    };
+                    if edge_visited(&visited_edges, key) {
+                        continue;
+                    }
+                    let len = sqrt_approx(dist2);
+                    let midx = (cur_pt.x + node.x) * 0.5;
+                    let midy = (cur_pt.y + node.y) * 0.5;
+                    let mid_dist = sqrt_approx(distance_sq(origin.0, origin.1, midx, midy));
                     gap_candidates.push(TraceCandidate {
                         next: nid_u,
                         turn,
-                        is_dead: false,
+                        abs_turn,
+                        out_x: voutx,
+                        out_y: vouty,
                         is_virtual: true,
-                        visited,
+                        visited: false,
                         he_idx: None,
+                        seg_id: None,
+                        len,
+                        mid_dist,
                         dist2,
+                        accepted_side,
                     });
                 }
 
-                if !gap_candidates.is_empty() && best_gap_dist.is_finite() {
+                if !gap_candidates.is_empty() && best_dist.is_finite() {
                     for gc in gap_candidates.into_iter() {
-                        if gc.dist2 <= best_gap_dist + 0.01 {
-                            let is_closure_edge = cur_node == start_from && gc.next == start_to;
-                            if gc.visited && !is_closure_edge {
-                                continue;
-                            }
+                        if gc.dist2 <= best_dist + 1e-3 {
                             usable.push(gc);
                         }
                     }
@@ -1298,45 +1362,48 @@ impl Editor {
                 return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug);
             }
 
-            let chosen_idx = match pick_candidate(&usable, side_rule) {
+            let mut side_indices: Vec<usize> = Vec::new();
+            let mut all_indices: Vec<usize> = Vec::new();
+            for (idx, cand) in usable.iter().enumerate() {
+                all_indices.push(idx);
+                if cand.accepted_side {
+                    side_indices.push(idx);
+                }
+            }
+            let pool_indices = if !side_indices.is_empty() {
+                side_indices.as_slice()
+            } else {
+                all_indices.as_slice()
+            };
+
+            let chosen_idx = match pick_candidate_idx(&usable, pool_indices) {
                 Some(i) => i,
                 None => return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug),
             };
 
-            let chosen = &usable[chosen_idx];
-            let edge = (cur_node, chosen.next);
+            let chosen = usable[chosen_idx].clone();
+            let selected_key = EdgeKey {
+                from: cur_node,
+                to: chosen.next,
+                seg: chosen.seg_id,
+                is_virtual: chosen.is_virtual,
+            };
 
-            // Build step debug before mutating state
             let mut step_cands: Vec<StepCandidateDebug> = Vec::new();
-            for cand in candidates.iter() {
-                let mut chosen_flag = false;
-                if !chosen.is_virtual && !cand.is_virtual && cand.next == chosen.next && cand.he_idx == chosen.he_idx {
-                    chosen_flag = true;
-                }
+            for (idx, cand) in usable.iter().enumerate() {
                 step_cands.push(StepCandidateDebug {
                     next: cand.next,
                     turn: cand.turn,
-                    is_dead: cand.is_dead,
+                    abs_turn: cand.abs_turn,
+                    out_x: cand.out_x,
+                    out_y: cand.out_y,
                     is_virtual: cand.is_virtual,
+                    accepted_side: cand.accepted_side,
                     was_visited: cand.visited,
-                    chosen: chosen_flag,
+                    chosen: idx == chosen_idx,
+                    len: cand.len,
+                    mid_dist: cand.mid_dist,
                 });
-            }
-            for cand in usable.iter() {
-                if cand.is_virtual {
-                    let mut chosen_flag = false;
-                    if chosen.is_virtual && cand.next == chosen.next {
-                        chosen_flag = true;
-                    }
-                    step_cands.push(StepCandidateDebug {
-                        next: cand.next,
-                        turn: cand.turn,
-                        is_dead: cand.is_dead,
-                        is_virtual: true,
-                        was_visited: cand.visited,
-                        chosen: chosen_flag,
-                    });
-                }
             }
             step_debug.push(StepDebug {
                 step_idx,
@@ -1346,18 +1413,18 @@ impl Editor {
                 candidates: step_cands,
             });
 
-            if edge == (start_from, start_to) && step_idx >= 1 {
-                return TraceResult::success(boundary_points, step_idx + 1, step_debug);
-            }
-
-            if visited_edges.iter().any(|e| *e == edge) {
-                return TraceResult::fail(FailReason::PrematureCycle, step_idx, step_debug);
-            }
-
-            visited_edges.push(edge);
             let next_pt = self.fill_graph.nodes[chosen.next as usize];
             boundary_points.push((next_pt.x, next_pt.y));
 
+            if selected_key == start_edge && step_idx >= 1 {
+                return TraceResult::success(boundary_points, step_idx + 1, step_debug);
+            }
+
+            if edge_visited(&visited_edges, selected_key) {
+                return TraceResult::fail(FailReason::PrematureCycle, step_idx, step_debug);
+            }
+
+            visited_edges.push(selected_key);
             prev_node = cur_node;
             cur_node = chosen.next;
             step_idx += 1;
@@ -1444,9 +1511,14 @@ impl Editor {
                 for cand in step.candidates.iter() {
                     self.fill_candidates_buf.push(cand.next as f32);
                     self.fill_candidates_buf.push(cand.turn);
-                    self.fill_candidates_buf.push(if cand.is_dead { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.abs_turn);
                     self.fill_candidates_buf.push(if cand.is_virtual { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.out_x);
+                    self.fill_candidates_buf.push(cand.out_y);
+                    self.fill_candidates_buf.push(if cand.accepted_side { 1.0 } else { 0.0 });
                     self.fill_candidates_buf.push(if cand.was_visited { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.len);
+                    self.fill_candidates_buf.push(cand.mid_dist);
                     self.fill_candidates_buf.push(if cand.chosen { 1.0 } else { 0.0 });
                 }
             }
@@ -1473,9 +1545,14 @@ impl Editor {
                 for cand in step.candidates.iter() {
                     self.fill_candidates_buf.push(cand.next as f32);
                     self.fill_candidates_buf.push(cand.turn);
-                    self.fill_candidates_buf.push(if cand.is_dead { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.abs_turn);
                     self.fill_candidates_buf.push(if cand.is_virtual { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.out_x);
+                    self.fill_candidates_buf.push(cand.out_y);
+                    self.fill_candidates_buf.push(if cand.accepted_side { 1.0 } else { 0.0 });
                     self.fill_candidates_buf.push(if cand.was_visited { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(cand.len);
+                    self.fill_candidates_buf.push(cand.mid_dist);
                     self.fill_candidates_buf.push(if cand.chosen { 1.0 } else { 0.0 });
                 }
             }
