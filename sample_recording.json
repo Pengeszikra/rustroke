@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "createdAt": 1707843298050,
+  "events": [
+    {"t": 0, "type": "AddLine", "data": {"x1": 100, "y1": 100, "x2": 300, "y2": 100}},
+    {"t": 300, "type": "AddLine", "data": {"x1": 300, "y1": 100, "x2": 200, "y2": 250}},
+    {"t": 600, "type": "AddLine", "data": {"x1": 200, "y1": 250, "x2": 100, "y2": 100}},
+    {"t": 1200, "type": "SetFillColor", "data": {"color": "#ff6b6b"}},
+    {"t": 1400, "type": "Fill", "data": {"x": 200, "y": 150, "color": "#ff6b6b"}},
+    {"t": 2200, "type": "AddLine", "data": {"x1": 400, "y1": 150, "x2": 600, "y2": 150}},
+    {"t": 2500, "type": "AddLine", "data": {"x1": 600, "y1": 150, "x2": 600, "y2": 300}},
+    {"t": 2800, "type": "AddLine", "data": {"x1": 600, "y1": 300, "x2": 400, "y2": 300}},
+    {"t": 3100, "type": "AddLine", "data": {"x1": 400, "y1": 300, "x2": 400, "y2": 150}},
+    {"t": 3600, "type": "SetFillColor", "data": {"color": "#4ecdc4"}},
+    {"t": 3800, "type": "Fill", "data": {"x": 500, "y": 225, "color": "#4ecdc4"}},
+    {"t": 4600, "type": "AddLine", "data": {"x1": 150, "y1": 350, "x2": 250, "y2": 350}},
+    {"t": 4900, "type": "AddLine", "data": {"x1": 250, "y1": 350, "x2": 200, "y2": 450}},
+    {"t": 5200, "type": "AddLine", "data": {"x1": 200, "y1": 450, "x2": 150, "y2": 350}},
+    {"t": 5700, "type": "SetFillColor", "data": {"color": "#95e1d3"}},
+    {"t": 5900, "type": "Fill", "data": {"x": 200, "y": 390, "color": "#95e1d3"}}
+  ]
+}

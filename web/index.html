@@ -137,7 +137,7 @@
   <div class="container">
     <header>
       <h1>Rustroke</h1>
-      <div style="display: flex; gap: 10px;">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <button id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
         <button id="clearBtn" title="Clear">Clear</button>
         <button id="fillBtn" title="Fill Region">Fill</button>
@@ -145,6 +145,13 @@
         <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
         <button id="graphDebugBtn" title="Toggle Graph Debug">Graph Debug</button>
         <button id="toggleLinesBtn" title="Toggle Lines Visibility">Hide Lines</button>
+        <span style="border-left: 2px solid #ccc; margin: 0 5px;"></span>
+        <button id="recordBtn" title="Start Recording">Record</button>
+        <button id="stopBtn" title="Stop Recording/Playback" disabled>Stop</button>
+        <button id="playBtn" title="Play Recording" disabled>Play</button>
+        <button id="clearRecordBtn" title="Clear Recording" disabled>Clear Rec</button>
+        <button id="exportBtn" title="Copy Recording JSON" disabled>Export</button>
+        <button id="importBtn" title="Import Recording JSON">Import</button>
       </div>
     </header>
 
@@ -183,6 +190,12 @@
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const playBtn = document.getElementById('playBtn');
+    const clearRecordBtn = document.getElementById('clearRecordBtn');
+    const exportBtn = document.getElementById('exportBtn');
+    const importBtn = document.getElementById('importBtn');
     const statusEl = document.getElementById('status');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
@@ -200,8 +213,353 @@
     let debugMode = false;
     let graphDebugMode = false;
     let showLines = true;
+    
+    // Recording/Playback state
+    let isRecording = false;
+    let isPlaying = false;
+    let recordStart = 0;
+    let events = [];
+    let recording = { version: 1, createdAt: 0, events: [] };
+    
     /** @type {{x: number, y: number}} */
     let startPoint = { x: 0, y: 0 };
+
+    /**
+     * Central action dispatcher
+     * Routes all actions through one point for recording/playback
+     * @param {Object} action - {type: string, data: Object}
+     * @param {Object} options - {source: "user"|"playback"}
+     */
+    function dispatch(action, options = {source: "user"}) {
+      dispatchAsync(action, options); // Fire and forget for sync calls
+    }
+
+    /**
+     * Async version of dispatch that returns Promise
+     * Used for playback to wait for animations
+     */
+    async function dispatchAsync(action, options = {source: "user"}) {
+      if (!wasm) return;
+      
+      const {source} = options;
+      
+      // Record user actions (not playback echoes)
+      if (source === "user" && isRecording) {
+        recordEvent(action);
+      }
+      
+      // Execute action
+      switch (action.type) {
+        case "AddLine": {
+          const {x1, y1, x2, y2} = action.data;
+          
+          // If playback, animate the line stroke
+          if (source === "playback") {
+            await new Promise(resolve => {
+              animateLineStroke(x1, y1, x2, y2, () => {
+                wasm.editor_add_line(x1, y1, x2, y2);
+                renderFromWasm();
+                resolve();
+              });
+            });
+          } else {
+            // User action: add immediately
+            wasm.editor_add_line(x1, y1, x2, y2);
+            renderFromWasm();
+          }
+          break;
+        }
+        case "Fill": {
+          const {x, y, color} = action.data;
+          const colorBytes = new TextEncoder().encode(color);
+          const colorPtr = wasm.memory.buffer.byteLength - 256;
+          const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
+          colorView.set(colorBytes);
+          wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+          
+          // Use fill_debug_at which uses the fill graph system and creates the fill
+          wasm.editor_fill_debug_at(x, y);
+          
+          renderFromWasm();
+          
+          // Render debug visuals only if debug mode is on
+          if (debugMode) {
+            renderFillTrace();
+            renderFillDebug();
+          }
+          break;
+        }
+        case "Undo": {
+          wasm.editor_undo();
+          renderFromWasm();
+          break;
+        }
+        case "Clear": {
+          wasm.editor_clear();
+          renderFromWasm();
+          renderFillTrace();
+          break;
+        }
+        case "SetFillColor": {
+          const {color} = action.data;
+          fillColor.value = color;
+          const colorBytes = new TextEncoder().encode(color);
+          const colorPtr = wasm.memory.buffer.byteLength - 256;
+          const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
+          colorView.set(colorBytes);
+          wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+          break;
+        }
+        case "ToggleShowLines": {
+          const {show} = action.data;
+          showLines = show;
+          toggleLinesBtn.textContent = showLines ? 'Hide Lines' : 'Show Lines';
+          console.log('[UI] showLines =', showLines);
+          renderFromWasm();
+          break;
+        }
+        case "ToggleDebug": {
+          const {debug} = action.data;
+          debugMode = debug;
+          debugBtn.classList.toggle('active', debug);
+          wasm.editor_set_debug(debugMode ? 1 : 0);
+          if (!debugMode) {
+            debugLayer.style.display = 'none';
+            fillTraceLayer.replaceChildren();
+            fillDebugLayer.replaceChildren();
+          } else {
+            debugLayer.style.display = 'block';
+            updateDebugIntersections();
+          }
+          break;
+        }
+      }
+    }
+
+    /**
+     * Animate line stroke during playback
+     * Shows preview line animating from start to end
+     */
+    function animateLineStroke(x1, y1, x2, y2, onComplete) {
+      const duration = 200; // ms to animate stroke
+      const startTime = performance.now();
+      
+      // Show preview line
+      preview.classList.add('active');
+      preview.setAttribute('x1', x1);
+      preview.setAttribute('y1', y1);
+      preview.setAttribute('x2', x1);
+      preview.setAttribute('y2', y1);
+      
+      function animate() {
+        const elapsed = performance.now() - startTime;
+        const progress = Math.min(elapsed / duration, 1);
+        
+        // Interpolate endpoint
+        const currentX = x1 + (x2 - x1) * progress;
+        const currentY = y1 + (y2 - y1) * progress;
+        
+        preview.setAttribute('x2', currentX);
+        preview.setAttribute('y2', currentY);
+        
+        if (progress < 1) {
+          requestAnimationFrame(animate);
+        } else {
+          // Animation complete
+          preview.classList.remove('active');
+          onComplete();
+        }
+      }
+      
+      requestAnimationFrame(animate);
+    }
+
+    /**
+     * Record an event with timestamp
+     */
+    function recordEvent(action) {
+      const t = performance.now() - recordStart;
+      events.push({t, type: action.type, data: action.data});
+      console.log(`[Record] ${action.type} at ${t.toFixed(0)}ms`, action.data);
+    }
+
+    /**
+     * Update UI button states based on recording/playback state
+     */
+    function updateRecordingUI() {
+      recordBtn.disabled = isRecording || isPlaying;
+      stopBtn.disabled = !isRecording && !isPlaying;
+      playBtn.disabled = isRecording || isPlaying || events.length === 0;
+      clearRecordBtn.disabled = isRecording || isPlaying || events.length === 0;
+      exportBtn.disabled = isRecording || isPlaying || events.length === 0;
+      
+      if (isRecording) {
+        recordBtn.textContent = 'Recording...';
+        recordBtn.classList.add('active');
+      } else {
+        recordBtn.textContent = 'Record';
+        recordBtn.classList.remove('active');
+      }
+      
+      if (isPlaying) {
+        playBtn.textContent = 'Playing...';
+        playBtn.classList.add('active');
+      } else {
+        playBtn.textContent = 'Play';
+        playBtn.classList.remove('active');
+      }
+    }
+
+    /**
+     * Disable/enable canvas input during playback
+     */
+    function setCanvasInputEnabled(enabled) {
+      if (enabled) {
+        canvas.style.pointerEvents = '';
+        canvas.style.opacity = '1';
+      } else {
+        canvas.style.pointerEvents = 'none';
+        canvas.style.opacity = '0.7';
+      }
+    }
+
+    /**
+     * Start recording
+     */
+    function startRecording() {
+      isRecording = true;
+      recordStart = performance.now();
+      events = [];
+      recording.createdAt = Date.now();
+      console.log('[Recording] Started');
+      updateRecordingUI();
+    }
+
+    /**
+     * Stop recording
+     */
+    function stopRecording() {
+      isRecording = false;
+      recording.events = events;
+      console.log(`[Recording] Stopped - ${events.length} events`);
+      updateRecordingUI();
+    }
+
+    /**
+     * Play recording
+     */
+    async function playRecording() {
+      if (events.length === 0) return;
+      
+      isPlaying = true;
+      setCanvasInputEnabled(false);
+      updateRecordingUI();
+      
+      // Clear scene before playback
+      dispatch({type: "Clear", data: {}}, {source: "playback"});
+      
+      console.log(`[Playback] Starting - ${events.length} events`);
+      
+      const startTime = performance.now();
+      
+      // Play events sequentially
+      for (let i = 0; i < events.length; i++) {
+        if (!isPlaying) break; // Check if stopped
+        
+        const event = events[i];
+        const targetTime = event.t;
+        const currentTime = performance.now() - startTime;
+        const delay = Math.max(0, targetTime - currentTime);
+        
+        // Wait until it's time for this event
+        if (delay > 0) {
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        
+        if (!isPlaying) break; // Check again after delay
+        
+        console.log(`[Playback] ${event.type} at ${event.t.toFixed(0)}ms`, event.data);
+        
+        // Dispatch and wait for completion (especially for AddLine animation)
+        await dispatchAsync({type: event.type, data: event.data}, {source: "playback"});
+      }
+      
+      if (isPlaying) {
+        finishPlayback();
+      }
+    }
+
+    /**
+     * Stop playback
+     */
+    function stopPlayback() {
+      isPlaying = false;
+      preview.classList.remove('active'); // Stop any ongoing animation
+      setCanvasInputEnabled(true);
+      console.log('[Playback] Stopped');
+      updateRecordingUI();
+    }
+
+    /**
+     * Finish playback naturally
+     */
+    function finishPlayback() {
+      setTimeout(() => {
+        isPlaying = false;
+        setCanvasInputEnabled(true);
+        console.log('[Playback] Finished');
+        updateRecordingUI();
+      }, 100);
+    }
+
+    /**
+     * Clear recording
+     */
+    function clearRecording() {
+      events = [];
+      recording.events = [];
+      console.log('[Recording] Cleared');
+      updateRecordingUI();
+    }
+
+    /**
+     * Export recording to clipboard
+     */
+    function exportRecording() {
+      recording.events = events;
+      const json = JSON.stringify(recording, null, 2);
+      navigator.clipboard.writeText(json).then(() => {
+        console.log('[Export] Recording copied to clipboard');
+        alert('Recording copied to clipboard!');
+      }).catch(err => {
+        console.error('[Export] Failed:', err);
+        alert('Export failed. See console for JSON.');
+        console.log(json);
+      });
+    }
+
+    /**
+     * Import recording from JSON
+     */
+    function importRecording() {
+      const json = prompt('Paste recording JSON:');
+      if (!json) return;
+      
+      try {
+        const imported = JSON.parse(json);
+        if (!imported.events || !Array.isArray(imported.events)) {
+          throw new Error('Invalid recording format');
+        }
+        recording = imported;
+        events = imported.events;
+        console.log(`[Import] Loaded ${events.length} events`);
+        alert(`Imported ${events.length} events!`);
+        updateRecordingUI();
+      } catch (err) {
+        console.error('[Import] Failed:', err);
+        alert('Import failed: ' + err.message);
+      }
+    }
 
     /**
      * Convert pointer event coordinates to SVG viewBox coordinates
@@ -795,17 +1153,12 @@
       if (fillMode) {
         fillMode = false;
         fillBtn.classList.remove('active');
-        // Set the color before filling
-        const colorHex = fillColor.value;
-        const colorBytes = new TextEncoder().encode(colorHex);
-        const colorPtr = wasm.memory.buffer.byteLength - 256;
-        const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
-        colorView.set(colorBytes);
-        wasm.editor_set_fill_color(colorPtr, colorBytes.length);
-        wasm.editor_fill_debug_at(point.x, point.y);
-        renderFillTrace();
-        renderFillDebug();
-        renderFromWasm();
+        
+        // Use dispatcher for fill action (handles debug rendering internally)
+        dispatch({
+          type: "Fill",
+          data: {x: point.x, y: point.y, color: fillColor.value}
+        }, {source: "user"});
       } else {
         startPoint = point;
         dragging = true;
@@ -913,9 +1266,14 @@
       preview.classList.remove('active');
       const end = toSvgPoint(evt);
       console.log(`Line added: (${startPoint.x.toFixed(1)},${startPoint.y.toFixed(1)}) -> (${end.x.toFixed(1)},${end.y.toFixed(1)})`);
-      wasm.editor_add_line(startPoint.x, startPoint.y, end.x, end.y);
+      
+      // Use dispatcher for recording support
+      dispatch({
+        type: "AddLine",
+        data: {x1: startPoint.x, y1: startPoint.y, x2: end.x, y2: end.y}
+      }, {source: "user"});
+      
       console.log('Total lines now:', wasm.editor_line_count());
-      renderFromWasm();
     }
 
     fillBtn.addEventListener('click', () => {
@@ -927,28 +1285,18 @@
 
     fillColor.addEventListener('change', () => {
       if (wasm) {
-        const colorHex = fillColor.value;
-        const colorBytes = new TextEncoder().encode(colorHex);
-        const colorPtr = wasm.memory.buffer.byteLength - 256;
-        const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
-        colorView.set(colorBytes);
-        wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+        dispatch({
+          type: "SetFillColor",
+          data: {color: fillColor.value}
+        }, {source: "user"});
       }
     });
 
     debugBtn.addEventListener('click', () => {
-      debugMode = !debugMode;
-      debugBtn.classList.toggle('active');
-      wasm.editor_set_debug(debugMode ? 1 : 0);
-      if (!debugMode) {
-        debugLayer.style.display = 'none';
-        // Clear fill debug visuals when debug mode is disabled
-        fillTraceLayer.replaceChildren();
-        fillDebugLayer.replaceChildren();
-      } else {
-        debugLayer.style.display = 'block';
-        updateDebugIntersections();
-      }
+      dispatch({
+        type: "ToggleDebug",
+        data: {debug: !debugMode}
+      }, {source: "user"});
     });
 
     graphDebugBtn.addEventListener('click', () => {
@@ -962,24 +1310,62 @@
     });
 
     toggleLinesBtn.addEventListener('click', () => {
-      showLines = !showLines;
-      toggleLinesBtn.textContent = showLines ? 'Hide Lines' : 'Show Lines';
-      console.log('[UI] showLines =', showLines);
-      renderFromWasm();
+      dispatch({
+        type: "ToggleShowLines",
+        data: {show: !showLines}
+      }, {source: "user"});
     });
 
     undoBtn.addEventListener('click', () => {
       if (wasm) {
-        wasm.editor_undo();
-        renderFromWasm();
+        dispatch({type: "Undo", data: {}}, {source: "user"});
       }
     });
 
     clearBtn.addEventListener('click', () => {
       if (wasm) {
-        wasm.editor_clear();
-        renderFromWasm();
-        renderFillTrace();
+        dispatch({type: "Clear", data: {}}, {source: "user"});
+      }
+    });
+
+    // Recording controls
+    recordBtn.addEventListener('click', () => {
+      if (!isRecording && !isPlaying) {
+        startRecording();
+      }
+    });
+
+    stopBtn.addEventListener('click', () => {
+      if (isRecording) {
+        stopRecording();
+      } else if (isPlaying) {
+        stopPlayback();
+      }
+    });
+
+    playBtn.addEventListener('click', () => {
+      if (!isRecording && !isPlaying && events.length > 0) {
+        playRecording();
+      }
+    });
+
+    clearRecordBtn.addEventListener('click', () => {
+      if (!isRecording && !isPlaying) {
+        if (confirm('Clear recording?')) {
+          clearRecording();
+        }
+      }
+    });
+
+    exportBtn.addEventListener('click', () => {
+      if (!isRecording && !isPlaying && events.length > 0) {
+        exportRecording();
+      }
+    });
+
+    importBtn.addEventListener('click', () => {
+      if (!isRecording && !isPlaying) {
+        importRecording();
       }
     });
 
@@ -1014,6 +1400,9 @@
       wasm.editor_set_fill_color(colorPtr, colorBytes.length);
       
       renderFromWasm();
+      
+      // Initialize recording UI
+      updateRecordingUI();
     })();
   </script>
 </body>
