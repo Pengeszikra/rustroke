@@ -13,5 +13,5 @@ cargo +nightly build --release --target wasm32-unknown-unknown
 
 cp target/wasm32-unknown-unknown/release/rust_svg_editor.wasm web/rust-svg-editor.wasm
 
-cd web
-python -m http.server 8080
+serve -port 8080 ./web
+

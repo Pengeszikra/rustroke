@@ -1417,6 +1417,33 @@ impl Editor {
             boundary_points.push((next_pt.x, next_pt.y));
 
             if selected_key == start_edge && step_idx >= 1 {
+                // Safety check: ensure we visited at least 3 unique nodes
+                // This prevents degenerate loops from dangling chains
+                let mut unique_nodes: Vec<u32> = Vec::new();
+                unique_nodes.push(start_from);
+                for edge in visited_edges.iter() {
+                    let mut found_from = false;
+                    let mut found_to = false;
+                    for &n in unique_nodes.iter() {
+                        if n == edge.from {
+                            found_from = true;
+                        }
+                        if n == edge.to {
+                            found_to = true;
+                        }
+                    }
+                    if !found_from {
+                        unique_nodes.push(edge.from);
+                    }
+                    if !found_to {
+                        unique_nodes.push(edge.to);
+                    }
+                }
+                
+                if unique_nodes.len() < 3 {
+                    return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug);
+                }
+                
                 return TraceResult::success(boundary_points, step_idx + 1, step_debug);
             }
 
@@ -1455,21 +1482,68 @@ impl Editor {
             return;
         }
 
-        // Pick starting sector nearest to origin
-        let mut best_seg_idx = 0usize;
-        let mut best_dist2 = f32::INFINITY;
+        // Pick starting segment nearest to origin
+        // CRITICAL: only consider segments where BOTH endpoints have degree >= 2
+        // This prevents starting fill from dangling edges (open chains)
+        let mut candidates: Vec<(usize, f32)> = Vec::new();
         for (i, seg) in self.fill_graph.segments.iter().enumerate() {
-            let a = self.fill_graph.nodes[seg.a as usize];
-            let b = self.fill_graph.nodes[seg.b as usize];
-            let mid_x = (a.x + b.x) * 0.5;
-            let mid_y = (a.y + b.y) * 0.5;
-            let d2 = distance_sq(ox, oy, mid_x, mid_y);
-            if d2 < best_dist2 {
-                best_dist2 = d2;
-                best_seg_idx = i;
+            let degree_a = if (seg.a as usize) < self.fill_graph.node_sectors.len() {
+                self.fill_graph.node_sectors[seg.a as usize].len()
+            } else {
+                0
+            };
+            let degree_b = if (seg.b as usize) < self.fill_graph.node_sectors.len() {
+                self.fill_graph.node_sectors[seg.b as usize].len()
+            } else {
+                0
+            };
+
+            // Only accept segments where both endpoints have degree >= 2
+            if degree_a >= 2 && degree_b >= 2 {
+                let a = self.fill_graph.nodes[seg.a as usize];
+                let b = self.fill_graph.nodes[seg.b as usize];
+                
+                // Compute distance to segment interior (not endpoints)
+                // Using parametric distance to line segment
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let seg_len_sq = dx * dx + dy * dy;
+                
+                let d2 = if seg_len_sq > 1e-9 {
+                    // Project click point onto segment
+                    let t = ((ox - a.x) * dx + (oy - a.y) * dy) / seg_len_sq;
+                    let t_clamped = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+                    let proj_x = a.x + t_clamped * dx;
+                    let proj_y = a.y + t_clamped * dy;
+                    distance_sq(ox, oy, proj_x, proj_y)
+                } else {
+                    // Degenerate segment (point)
+                    distance_sq(ox, oy, a.x, a.y)
+                };
+                
+                candidates.push((i, d2));
             }
         }
 
+        // Sort by distance and pick closest valid segment
+        if candidates.is_empty() {
+            // No valid boundary edge found - abort fill
+            // Fill aborted: no valid boundary edge near cursor
+            let mut result = Vec::new();
+            result.push((self.fill_trace_buf.len() / 3) as f32);
+            result.extend(self.fill_trace_buf.drain(..));
+            self.fill_trace_buf = result;
+            self.fill_candidates_buf[0] = 0.0;
+            return;
+        }
+
+        candidates.sort_by(|a, b| {
+            if a.1 < b.1 { core::cmp::Ordering::Less }
+            else if a.1 > b.1 { core::cmp::Ordering::Greater }
+            else { core::cmp::Ordering::Equal }
+        });
+
+        let best_seg_idx = candidates[0].0;
         let start_seg = self.fill_graph.segments[best_seg_idx];
         let node_a = start_seg.a;
         let node_b = start_seg.b;
