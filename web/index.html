@@ -144,6 +144,7 @@
         <input id="fillColor" type="color" value="#747474" title="Fill color">
         <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
         <button id="graphDebugBtn" title="Toggle Graph Debug">Graph Debug</button>
+        <button id="toggleLinesBtn" title="Toggle Lines Visibility">Hide Lines</button>
       </div>
     </header>
 
@@ -181,6 +182,7 @@
     const fillColor = document.getElementById('fillColor');
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
+    const toggleLinesBtn = document.getElementById('toggleLinesBtn');
     const statusEl = document.getElementById('status');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
@@ -197,6 +199,7 @@
     let fillMode = false;
     let debugMode = false;
     let graphDebugMode = false;
+    let showLines = true;
     /** @type {{x: number, y: number}} */
     let startPoint = { x: 0, y: 0 };
 
@@ -219,22 +222,34 @@
       if (!wasm) return;
       const len = wasm.editor_export_len_f32();
       const ptr = wasm.editor_export_ptr_f32();
-      if (!ptr || len === 0) {
-        linesGroup.replaceChildren();
-        statusEl.textContent = 'Lines: 0';
-      } else {
-        const arr = new Float32Array(wasm.memory.buffer, ptr, len);
-        const fragments = [];
-        for (let i = 0; i < arr.length; i += 4) {
-          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-          line.setAttribute('x1', arr[i + 0]);
-          line.setAttribute('y1', arr[i + 1]);
-          line.setAttribute('x2', arr[i + 2]);
-          line.setAttribute('y2', arr[i + 3]);
-          fragments.push(line);
+      
+      // Only render lines if showLines is true
+      if (showLines) {
+        if (!ptr || len === 0) {
+          linesGroup.replaceChildren();
+          statusEl.textContent = 'Lines: 0';
+        } else {
+          const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+          const fragments = [];
+          for (let i = 0; i < arr.length; i += 4) {
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+            line.setAttribute('x1', arr[i + 0]);
+            line.setAttribute('y1', arr[i + 1]);
+            line.setAttribute('x2', arr[i + 2]);
+            line.setAttribute('y2', arr[i + 3]);
+            fragments.push(line);
+          }
+          linesGroup.replaceChildren(...fragments);
+          statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
         }
-        linesGroup.replaceChildren(...fragments);
-        statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
+      } else {
+        // Hide lines but still update status
+        linesGroup.replaceChildren();
+        if (ptr && len > 0) {
+          statusEl.textContent = `Lines: ${wasm.editor_line_count()} (hidden)`;
+        } else {
+          statusEl.textContent = 'Lines: 0';
+        }
       }
 
       // Render fills
@@ -310,6 +325,12 @@
      * Render fill debug diagnostics (both candidate polygons)
      */
     function renderFillDebug() {
+      // Only render fill debug visuals in debug mode
+      if (!debugMode) {
+        fillDebugLayer.replaceChildren();
+        return;
+      }
+      
       fillDebugLayer.replaceChildren();
       
       if (!wasm) return;
@@ -358,6 +379,12 @@
      * Render fill trace from WASM buffer
      */
      function renderFillTrace() {
+      // Only render fill trace visuals in debug mode
+      if (!debugMode) {
+        fillTraceLayer.replaceChildren();
+        return;
+      }
+      
       fillTraceLayer.replaceChildren();
 
       if (!wasm) return;
@@ -782,7 +809,9 @@
       } else {
         startPoint = point;
         dragging = true;
-        preview.classList.add('active');
+        if (showLines) {
+          preview.classList.add('active');
+        }
         preview.setAttribute('x1', startPoint.x);
         preview.setAttribute('y1', startPoint.y);
         preview.setAttribute('x2', startPoint.x);
@@ -913,6 +942,9 @@
       wasm.editor_set_debug(debugMode ? 1 : 0);
       if (!debugMode) {
         debugLayer.style.display = 'none';
+        // Clear fill debug visuals when debug mode is disabled
+        fillTraceLayer.replaceChildren();
+        fillDebugLayer.replaceChildren();
       } else {
         debugLayer.style.display = 'block';
         updateDebugIntersections();
@@ -927,6 +959,13 @@
       } else {
         graphDebugLayer.replaceChildren();
       }
+    });
+
+    toggleLinesBtn.addEventListener('click', () => {
+      showLines = !showLines;
+      toggleLinesBtn.textContent = showLines ? 'Hide Lines' : 'Show Lines';
+      console.log('[UI] showLines =', showLines);
+      renderFromWasm();
     });
 
     undoBtn.addEventListener('click', () => {

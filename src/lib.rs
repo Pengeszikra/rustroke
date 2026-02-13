@@ -227,7 +227,8 @@ impl Polygon {
 
 enum Command {
     Add,
-    Clear(Vec<Line>),
+    AddFill,
+    Clear(Vec<Line>, Vec<Polygon>),
 }
 
 fn distance_sq(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
@@ -1799,6 +1800,7 @@ impl Editor {
 
         if polygon.points.len() >= 4 {
             self.fills.push(polygon);
+            self.history.push(Command::AddFill);
             self.refresh_export_fills();
         }
     }
@@ -1817,6 +1819,7 @@ impl Editor {
             }
             
             self.fills.push(polygon);
+            self.history.push(Command::AddFill);
             self.refresh_export_fills();
         }
     }
@@ -1928,10 +1931,11 @@ impl Editor {
     }
 
     fn clear(&mut self) {
-        let previous = self.lines.clone();
+        let previous_lines = self.lines.clone();
+        let previous_fills = self.fills.clone();
         self.lines.clear();
         self.fills.clear();
-        self.history.push(Command::Clear(previous));
+        self.history.push(Command::Clear(previous_lines, previous_fills));
         self.fill_trace_buf.clear();
         self.refresh_export();
         self.recompute_intersections();
@@ -1943,12 +1947,17 @@ impl Editor {
             Some(Command::Add) => {
                 self.lines.pop();
             }
-            Some(Command::Clear(previous)) => {
-                self.lines = previous;
+            Some(Command::AddFill) => {
+                self.fills.pop();
+            }
+            Some(Command::Clear(previous_lines, previous_fills)) => {
+                self.lines = previous_lines;
+                self.fills = previous_fills;
             }
             None => {}
         }
         self.refresh_export();
+        self.refresh_export_fills();
         self.recompute_intersections();
         self.build_fill_graph();
     }
@@ -2174,6 +2183,8 @@ pub extern "C" fn editor_fill(x: f32, y: f32, color_ptr: *const u8, color_len: u
 
             if polygon.is_closed() {
                 editor.fills.push(polygon.with_color(color));
+                editor.history.push(Command::AddFill);
+                editor.refresh_export_fills();
             }
         }
     }
