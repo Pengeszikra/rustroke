@@ -1243,6 +1243,34 @@ async function main() {
       }
     });
 
+    // Escape key handler - turn off fill, debug, and graph modes
+    document.addEventListener('keydown', (evt) => {
+      if (evt.key === 'Escape') {
+        // Turn off fill mode
+        if (fillMode) {
+          fillMode = false;
+          fillBtn.classList.remove('active');
+          canvas.style.cursor = 'default';
+        }
+        
+        // Turn off debug mode
+        if (debugMode) {
+          debugMode = false;
+          debugBtn.classList.remove('active');
+          if (wasm) wasm.editor_set_debug(false);
+          clearDebugLayers();
+        }
+        
+        // Turn off graph debug mode
+        if (graphDebugMode) {
+          graphDebugMode = false;
+          graphDebugBtn.classList.remove('active');
+          if (wasm) wasm.editor_set_graph_debug(false);
+          graphDebugLayer.replaceChildren();
+        }
+      }
+    });
+
   // Load and initialize WASM module
   console.log('[WASM] Loading module...');
   wasm = await initWasm();
