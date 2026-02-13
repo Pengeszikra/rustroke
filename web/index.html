@@ -123,6 +123,7 @@
         <button id="fillBtn" title="Fill Region">Fill</button>
         <input id="fillColor" type="color" value="#747474" title="Fill color">
         <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
+        <button id="graphDebugBtn" title="Toggle Graph Debug">Graph Debug</button>
       </div>
     </header>
 
@@ -134,12 +135,14 @@
       </defs>
       <g id="fills"></g>
       <g id="lines"></g>
+      <g id="graphDebugLayer" pointer-events="none"></g>
       <line id="preview"></line>
       <g id="debugLayer">
         <line id="debugNearestLine"></line>
         <circle id="debugNearestPoint"></circle>
         <line id="debugRay"></line>
         <g id="debugIntersections"></g>
+        <g id="fillTraceLayer" pointer-events="none"></g>
       </g>
     </svg>
 
@@ -156,18 +159,22 @@
     const fillBtn = document.getElementById('fillBtn');
     const fillColor = document.getElementById('fillColor');
     const debugBtn = document.getElementById('debugBtn');
+    const graphDebugBtn = document.getElementById('graphDebugBtn');
     const statusEl = document.getElementById('status');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
     const debugNearestPoint = document.getElementById('debugNearestPoint');
     const debugRay = document.getElementById('debugRay');
     const debugIntersectionsGroup = document.getElementById('debugIntersections');
+    const fillTraceLayer = document.getElementById('fillTraceLayer');
+    const graphDebugLayer = document.getElementById('graphDebugLayer');
     const viewBox = canvas.viewBox.baseVal;
 
     let wasm = null;
     let dragging = false;
     let fillMode = false;
     let debugMode = false;
+    let graphDebugMode = false;
     /** @type {{x: number, y: number}} */
     let startPoint = { x: 0, y: 0 };
 
@@ -244,6 +251,12 @@
       if (debugMode) {
         updateDebugIntersections();
       }
+
+      if (graphDebugMode) {
+        renderGraphDebug();
+      } else {
+        graphDebugLayer.replaceChildren();
+      }
     }
 
     /**
@@ -272,7 +285,398 @@
     }
 
     /**
-     * Encode string to WASM memory and return pointer/length
+     * Render fill trace from WASM buffer
+     */
+    function renderFillTrace() {
+      fillTraceLayer.replaceChildren();
+
+      if (!wasm) return;
+
+      const len = wasm.editor_fill_trace_len_f32();
+      const ptr = wasm.editor_fill_trace_ptr_f32();
+
+      if (len <= 1 || !ptr) {
+        console.log('[Fill Trace] No trace data');
+        return;
+      }
+
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      const pointCount = Math.floor(arr[0]);
+
+      if (pointCount <= 0) {
+        console.log('[Fill Trace] No trace points');
+        return;
+      }
+
+      const stepTypeNames = ['ORIGIN', 'NEAREST', 'ENDPOINT', 'CHAIN', '?', '?', '?', '?', '?', 'CLOSED'];
+      const stepTypeColors = {
+        0: '#ff8c00',  // orange
+        1: '#00bfff',  // cyan
+        2: '#ff1493',  // magenta
+        3: '#00ff00',  // green (default for chain)
+        9: '#ff0000'   // red
+      };
+
+      console.log(`%c[Fill Trace] Found ${pointCount} steps`, 'color: #2563eb; font-weight: bold; font-size: 12px');
+
+      let idx = 1;
+      for (let i = 0; i < pointCount && idx < arr.length; i++) {
+        const x = arr[idx];
+        const y = arr[idx + 1];
+        const stepType = Math.floor(arr[idx + 2]);
+        idx += 3;
+
+        const stepName = stepTypeNames[stepType] || 'UNKNOWN';
+        const stepColor = stepTypeColors[stepType] || '#999999';
+
+        // Log to console
+        let logMessage = `  Step ${i}: `;
+        if (stepType === 0) {
+          logMessage += `ORIGIN at (${x.toFixed(0)}, ${y.toFixed(0)})`;
+        } else if (stepType === 1) {
+          logMessage += `NEAREST point on segment at (${x.toFixed(0)}, ${y.toFixed(0)})`;
+        } else if (stepType === 2) {
+          logMessage += `ENDPOINT (start of chain) at (${x.toFixed(0)}, ${y.toFixed(0)})`;
+        } else if (stepType === 3) {
+          logMessage += `CHAIN point #${i - 2} at (${x.toFixed(0)}, ${y.toFixed(0)})`;
+        } else if (stepType === 9) {
+          logMessage += `CLOSED/CYCLE at (${x.toFixed(0)}, ${y.toFixed(0)}) ✓`;
+        }
+
+        console.log(`%c${logMessage}`, `color: ${stepColor}; font-weight: ${stepType === 0 || stepType === 1 || stepType === 2 ? 'bold' : 'normal'}`);
+
+        // Render circle
+        const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        circle.setAttribute('cx', x);
+        circle.setAttribute('cy', y);
+        circle.setAttribute('fill', 'none');
+        circle.setAttribute('stroke-width', 2);
+
+        if (stepType === 0) {
+          circle.setAttribute('stroke', '#ff8c00');  // orange
+          circle.setAttribute('r', 5);
+        } else if (stepType === 1) {
+          circle.setAttribute('stroke', '#00bfff');  // cyan
+          circle.setAttribute('r', 5);
+        } else if (stepType === 2) {
+          circle.setAttribute('stroke', '#ff1493');  // magenta
+          circle.setAttribute('r', 5);
+        } else if (stepType === 3) {
+          // Alternate green/yellow
+          const isGreen = (i - 2) % 2 === 0;
+          circle.setAttribute('stroke', isGreen ? '#00ff00' : '#ffff00');
+          circle.setAttribute('r', 4);
+        } else if (stepType === 9) {
+          circle.setAttribute('stroke', '#ff0000');  // red (closed)
+          circle.setAttribute('r', 6);
+        }
+
+        fillTraceLayer.appendChild(circle);
+      }
+
+      console.log(`%c[Fill Trace] Complete`, 'color: #059669; font-weight: bold; font-size: 12px');
+      
+      // Log fill walk debug details
+      logFillWalkDebug();
+      // Log raw outgoing half-edges for the current node
+      logNodeOutgoing();
+      // Log duplicate node keys if any
+      logNodeAudit();
+      
+      // Log adjacency debug (CCW half-edge walk info)
+      logAdjacencyDebug();
+    }
+
+    function logAdjacencyDebug() {
+      if (!wasm) return;
+      
+      if (typeof wasm.editor_adjacency_debug_len_f32 !== 'function' || 
+          typeof wasm.editor_adjacency_debug_ptr_f32 !== 'function') {
+        return;
+      }
+      
+      const len = wasm.editor_adjacency_debug_len_f32();
+      const ptr = wasm.editor_adjacency_debug_ptr_f32();
+      
+      if (len <= 5 || !ptr) {
+        return;
+      }
+      
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      const numEdges = Math.floor(arr[0]);
+      
+      if (numEdges <= 0) {
+        return;
+      }
+      
+      // Buffer format: [num_edges, cur.x, cur.y, prev.x, prev.y, (repeated) from.x, from.y, to.x, to.y, seg_id, he_idx]
+      const curX = arr[1];
+      const curY = arr[2];
+      const prevX = arr[3];
+      const prevY = arr[4];
+      
+      console.log(`%c[Adjacency] Junction (${curX.toFixed(0)}, ${curY.toFixed(0)}) - ${numEdges} outgoing edge(s)`, 
+                  'color: #d946a6; font-weight: bold; font-size: 11px');
+      
+      let idx = 5;
+      for (let i = 0; i < numEdges && idx + 5 < len; i++) {
+        const fromX = arr[idx];
+        const fromY = arr[idx + 1];
+        const toX = arr[idx + 2];
+        const toY = arr[idx + 3];
+        const segId = Math.floor(arr[idx + 4]);
+        const heIdx = Math.floor(arr[idx + 5]);
+        idx += 6;
+        
+        const isReverse = toX === prevX && toY === prevY;
+        const style = isReverse ? 'color: #ef4444; text-decoration: underline;' : 'color: #06b6d4;';
+        
+        console.log(
+          `%c  Edge ${i}: (${fromX.toFixed(0)}, ${fromY.toFixed(0)}) → (${toX.toFixed(0)}, ${toY.toFixed(0)}) | seg=${segId}, he=${heIdx}${isReverse ? ' [REVERSE]' : ''}`,
+          style
+        );
+      }
+    }
+
+    function logFillWalkDebug() {
+      if (!wasm) return;
+      
+      if (typeof wasm.editor_fill_walk_debug_len_f32 !== 'function' ||
+          typeof wasm.editor_fill_walk_debug_ptr_f32 !== 'function') {
+        console.warn('[FillWalk] Functions not available');
+        return;
+      }
+      
+      const len = wasm.editor_fill_walk_debug_len_f32();
+      const ptr = wasm.editor_fill_walk_debug_ptr_f32();
+      
+      if (len <= 0 || !ptr) {
+        return;
+      }
+      
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      let idx = 0;
+      let block = 0;
+
+      while (idx + 6 < len) {
+        const stepIndex = Math.floor(arr[idx]);
+        const curX = arr[idx + 1];
+        const curY = arr[idx + 2];
+        const prevX = arr[idx + 3];
+        const prevY = arr[idx + 4];
+        const curDeg = Math.floor(arr[idx + 5]);
+        const candCount = Math.floor(arr[idx + 6]);
+        idx += 7;
+
+        console.log(`%c[Step ${stepIndex}] Node (${curX.toFixed(1)}, ${curY.toFixed(1)}) deg=${curDeg} from (${prevX.toFixed(1)}, ${prevY.toFixed(1)}) | ${candCount} cand(s)`, 
+                    'color: #9333ea; font-weight: bold; font-size: 11px');
+
+        for (let i = 0; i < candCount && idx + 5 < len; i++) {
+          const nextX = arr[idx];
+          const nextY = arr[idx + 1];
+          const nextDeg = Math.floor(arr[idx + 2]);
+          const isDead = Math.floor(arr[idx + 3]) === 1;
+          const angle = arr[idx + 4];
+          const chosen = Math.floor(arr[idx + 5]) === 1;
+          idx += 6;
+
+          const symbol = chosen ? '✓' : ' ';
+          const style = chosen
+            ? 'color: #22c55e; font-weight: bold;'
+            : (isDead ? 'color: #ef4444;' : 'color: #6b7280;');
+
+          console.log(
+            `%c  [${symbol}] -> (${nextX.toFixed(1)}, ${nextY.toFixed(1)}) deg=${nextDeg} dead=${isDead ? 1 : 0} angle=${angle.toFixed(3)}`,
+            style
+          );
+        }
+
+        block += 1;
+      }
+
+      if (block === 0) {
+        console.log('[FillWalk] Buffer empty');
+      }
+    }
+
+    function logNodeOutgoing() {
+      if (!wasm ||
+          typeof wasm.editor_node_outgoing_len_f32 !== 'function' ||
+          typeof wasm.editor_node_outgoing_ptr_f32 !== 'function') {
+        return;
+      }
+
+      const len = wasm.editor_node_outgoing_len_f32();
+      const ptr = wasm.editor_node_outgoing_ptr_f32();
+      if (!ptr || len < 8) {
+        return;
+      }
+
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      const curId = Math.floor(arr[0]);
+      const prevId = Math.floor(arr[1]);
+      const curX = arr[2];
+      const curY = arr[3];
+      const prevX = arr[4];
+      const prevY = arr[5];
+      const outgoingCount = Math.floor(arr[6]);
+      const candidateCount = Math.floor(arr[7]);
+
+      console.log(`%c[Outgoing] Node ${curId} at (${curX.toFixed(0)}, ${curY.toFixed(0)}) from prev ${prevId} (${prevX.toFixed(0)}, ${prevY.toFixed(0)}) | outgoing=${outgoingCount} | candidates=${candidateCount}`,
+                  'color: #0ea5e9; font-weight: bold; font-size: 11px');
+
+      let idx = 8;
+      for (let i = 0; i < outgoingCount && idx + 8 < len; i++) {
+        const heIdx = Math.floor(arr[idx]);
+        const fromId = Math.floor(arr[idx + 1]);
+        const toId = Math.floor(arr[idx + 2]);
+        const fromX = arr[idx + 3];
+        const fromY = arr[idx + 4];
+        const toX = arr[idx + 5];
+        const toY = arr[idx + 6];
+        const angle = arr[idx + 7];
+        const isBack = Math.floor(arr[idx + 8]) === 1;
+        idx += 9;
+
+        const style = isBack ? 'color: #ef4444;' : 'color: #10b981;';
+        console.log(
+          `%c  he=${heIdx} ${fromId}->${toId}  (${fromX.toFixed(0)},${fromY.toFixed(0)}) → (${toX.toFixed(0)},${toY.toFixed(0)}) | angle=${angle.toFixed(2)} ${isBack ? '[BACK]' : ''}`,
+          style
+        );
+      }
+    }
+
+    function logNodeAudit() {
+      if (!wasm ||
+          typeof wasm.editor_node_audit_len_f32 !== 'function' ||
+          typeof wasm.editor_node_audit_ptr_f32 !== 'function') {
+        return;
+      }
+
+      const len = wasm.editor_node_audit_len_f32();
+      const ptr = wasm.editor_node_audit_ptr_f32();
+      if (!ptr || len < 1) {
+        return;
+      }
+
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      const groupCount = Math.floor(arr[0]);
+      if (groupCount <= 0) {
+        return;
+      }
+
+      console.log(`%c[NodeAudit] Found ${groupCount} duplicate key group(s)`, 'color: #f97316; font-weight: bold; font-size: 11px');
+      let idx = 1;
+      for (let g = 0; g < groupCount && idx + 2 < len; g++) {
+        const kx = arr[idx]; const ky = arr[idx + 1]; const cnt = Math.floor(arr[idx + 2]); idx += 3;
+        const pts = [];
+        for (let i = 0; i < cnt && idx + 2 < len; i++) {
+          const id = Math.floor(arr[idx]); const x = arr[idx + 1]; const y = arr[idx + 2];
+          pts.push(`#${id} (${x.toFixed(2)}, ${y.toFixed(2)})`);
+          idx += 3;
+        }
+        console.log(`  key=(${kx},${ky}) count=${cnt}: ${pts.join(' | ')}`);
+      }
+    }
+
+    function renderGraphDebug() {
+      if (!wasm || !graphDebugMode) {
+        graphDebugLayer.replaceChildren();
+        return;
+      }
+
+      if (typeof wasm.editor_export_graph_debug_len_f32 !== 'function' ||
+          typeof wasm.editor_export_graph_debug_ptr_f32 !== 'function') {
+        console.warn('[GraphDebug] Functions not available');
+        return;
+      }
+
+      const len = wasm.editor_export_graph_debug_len_f32();
+      const ptr = wasm.editor_export_graph_debug_ptr_f32();
+      if (!ptr || len < 1) {
+        graphDebugLayer.replaceChildren();
+        return;
+      }
+
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      let idx = 0;
+      const segCount = Math.floor(arr[idx++] || 0);
+      const segFragments = [];
+      const nodeFragments = [];
+
+      for (let i = 0; i < segCount && idx + 4 < len; i++) {
+        const ax = arr[idx++]; const ay = arr[idx++]; const bx = arr[idx++]; const by = arr[idx++]; const segId = arr[idx++];
+        const hue = (segId * 137.508) % 360;
+        const color = `hsl(${hue}, 70%, 50%)`;
+
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', ax); line.setAttribute('y1', ay);
+        line.setAttribute('x2', bx); line.setAttribute('y2', by);
+        line.setAttribute('stroke', color);
+        line.setAttribute('stroke-width', 3);
+        line.setAttribute('stroke-linecap', 'round');
+        segFragments.push(line);
+
+        // Arrow at midpoint pointing A->B
+        const midX = (ax + bx) * 0.5;
+        const midY = (ay + by) * 0.5;
+        const angle = Math.atan2(by - ay, bx - ax);
+        const size = 6;
+        const leftAngle = angle + Math.PI * 0.85;
+        const rightAngle = angle - Math.PI * 0.85;
+        const p1x = midX;
+        const p1y = midY;
+        const p2x = midX + Math.cos(leftAngle) * size;
+        const p2y = midY + Math.sin(leftAngle) * size;
+        const p3x = midX + Math.cos(rightAngle) * size;
+        const p3y = midY + Math.sin(rightAngle) * size;
+
+        const arrow = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+        arrow.setAttribute('points', `${p1x},${p1y} ${p2x},${p2y} ${p3x},${p3y}`);
+        arrow.setAttribute('fill', color);
+        arrow.setAttribute('opacity', '0.8');
+        segFragments.push(arrow);
+
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', midX);
+        label.setAttribute('y', midY - 4);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('dominant-baseline', 'central');
+        label.setAttribute('fill', 'white');
+        label.setAttribute('stroke', 'black');
+        label.setAttribute('stroke-width', '0.75');
+        label.setAttribute('font-size', '10');
+        label.textContent = Math.floor(segId).toString();
+        segFragments.push(label);
+      }
+
+      if (idx < len) {
+        const nodeCount = Math.floor(arr[idx++] || 0);
+        for (let i = 0; i < nodeCount && idx + 2 < len; i++) {
+          const nx = arr[idx++]; const ny = arr[idx++]; const nodeId = arr[idx++];
+          const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+          circle.setAttribute('cx', nx);
+          circle.setAttribute('cy', ny);
+          circle.setAttribute('r', 3);
+          circle.setAttribute('fill', 'black');
+          nodeFragments.push(circle);
+
+          const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+          label.setAttribute('x', nx + 5);
+          label.setAttribute('y', ny - 5);
+          label.setAttribute('fill', 'black');
+          label.setAttribute('font-size', '10');
+          label.setAttribute('stroke', 'white');
+          label.setAttribute('stroke-width', '0.5');
+          label.textContent = `#${Math.floor(nodeId)}`;
+          nodeFragments.push(label);
+        }
+      }
+
+      graphDebugLayer.replaceChildren(...segFragments, ...nodeFragments);
+    }
+
+    /**
      * Allocates from the end of memory buffer
      * @param {string} str - string to encode
      * @returns {{ptr: number, len: number}} memory pointer and length
@@ -294,9 +698,15 @@
       if (fillMode) {
         fillMode = false;
         fillBtn.classList.remove('active');
-        const color = fillColor.value;
-        const { ptr, len } = encodeStringToWasm(color);
-        wasm.editor_fill(point.x, point.y, ptr, len);
+        // Set the color before filling
+        const colorHex = fillColor.value;
+        const colorBytes = new TextEncoder().encode(colorHex);
+        const colorPtr = wasm.memory.buffer.byteLength - 256;
+        const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
+        colorView.set(colorBytes);
+        wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+        wasm.editor_fill_debug_at(point.x, point.y);
+        renderFillTrace();
         renderFromWasm();
       } else {
         startPoint = point;
@@ -415,6 +825,17 @@
       else canvas.style.cursor = 'crosshair';
     });
 
+    fillColor.addEventListener('change', () => {
+      if (wasm) {
+        const colorHex = fillColor.value;
+        const colorBytes = new TextEncoder().encode(colorHex);
+        const colorPtr = wasm.memory.buffer.byteLength - 256;
+        const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
+        colorView.set(colorBytes);
+        wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+      }
+    });
+
     debugBtn.addEventListener('click', () => {
       debugMode = !debugMode;
       debugBtn.classList.toggle('active');
@@ -424,6 +845,16 @@
       } else {
         debugLayer.style.display = 'block';
         updateDebugIntersections();
+      }
+    });
+
+    graphDebugBtn.addEventListener('click', () => {
+      graphDebugMode = !graphDebugMode;
+      graphDebugBtn.classList.toggle('active');
+      if (graphDebugMode) {
+        renderGraphDebug();
+      } else {
+        graphDebugLayer.replaceChildren();
       }
     });
 
@@ -438,6 +869,7 @@
       if (wasm) {
         wasm.editor_clear();
         renderFromWasm();
+        renderFillTrace();
       }
     });
 
@@ -462,6 +894,15 @@
       const { instance } = await loadWasm();
       wasm = instance.exports;
       wasm.editor_init();
+      
+      // Initialize fill color
+      const colorHex = fillColor.value;
+      const colorBytes = new TextEncoder().encode(colorHex);
+      const colorPtr = wasm.memory.buffer.byteLength - 256;
+      const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
+      colorView.set(colorBytes);
+      wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+      
       renderFromWasm();
     })();
   </script>
