@@ -74,6 +74,8 @@ const SNAP_EPS: f32 = 0.25; // Grid snap for intersection deduplication
 #[allow(dead_code)]
 const MAX_TRACE_STEPS: u32 = 2048;
 const TAU: f32 = PI * 2.0;
+const GAP_RADIUS: f32 = 12.0;
+const MIN_AREA: f32 = 50.0;
 const FRAC_3_PI_4: f32 = PI * 0.75;
 
 fn floor_f32(x: f32) -> f32 {
@@ -182,6 +184,7 @@ impl IntersectionRegistry {
     }
 }
 
+#[allow(dead_code)]
 fn other_end(seg: &Seg, node: u32) -> u32 {
     if seg.a == node { seg.b } else { seg.a }
 }
@@ -245,6 +248,11 @@ fn round_to_i32(v: f32) -> i32 {
     } else {
         (v - 0.5) as i32
     }
+}
+
+#[inline(always)]
+fn cross(ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    ax * by - ay * bx
 }
 
 #[allow(dead_code)]
@@ -533,6 +541,183 @@ fn atan2_approx(y: f32, x: f32) -> f32 {
         angle = -angle;
     }
     angle
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+enum FailReason {
+    DeadEnd,
+    StepLimit,
+    PrematureCycle,
+    NoClosure,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SideRule {
+    KeepLeft,
+    KeepRight,
+}
+
+#[derive(Clone)]
+struct StepCandidateDebug {
+    next: u32,
+    turn: f32,
+    is_dead: bool,
+    is_virtual: bool,
+    was_visited: bool,
+    chosen: bool,
+}
+
+#[derive(Clone)]
+struct StepDebug {
+    step_idx: u32,
+    cur: u32,
+    prev: u32,
+    vin: (f32, f32),
+    candidates: Vec<StepCandidateDebug>,
+}
+
+struct TraceResult {
+    closed: bool,
+    points: Vec<(f32, f32)>,
+    #[allow(dead_code)]
+    fail_reason: Option<FailReason>,
+    #[allow(dead_code)]
+    steps: u32,
+    step_debug: Vec<StepDebug>,
+}
+
+impl TraceResult {
+    fn success(points: Vec<(f32, f32)>, steps: u32, step_debug: Vec<StepDebug>) -> Self {
+        Self {
+            closed: true,
+            points,
+            fail_reason: None,
+            steps,
+            step_debug,
+        }
+    }
+
+    fn fail(reason: FailReason, steps: u32, step_debug: Vec<StepDebug>) -> Self {
+        Self {
+            closed: false,
+            points: Vec::new(),
+            fail_reason: Some(reason),
+            steps,
+            step_debug,
+        }
+    }
+}
+
+// Compute signed area of polygon (2x area)
+// Positive = CCW winding, Negative = CW
+fn signed_area_2x(points: &[(f32, f32)]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..points.len() {
+        let p0 = points[i];
+        let p1 = points[(i + 1) % points.len()];
+        area += p0.0 * p1.1 - p1.0 * p0.1;
+    }
+    area
+}
+
+// Point in polygon using even-odd rule with robustness against vertex hits
+fn point_in_poly_evenodd(pt: (f32, f32), poly: &[(f32, f32)]) -> bool {
+    if poly.len() < 3 {
+        return false;
+    }
+    const HIT_SLOP: f32 = 1e-6;
+    let (px, py) = pt;
+    let mut crossings = 0;
+    let mut j = poly.len() - 1;
+    
+    for i in 0..poly.len() {
+        let (x0, y0) = poly[j];
+        let (x1, y1) = poly[i];
+        
+        // Check if point is very close to vertex
+        if absf(x1 - px) < HIT_SLOP && absf(y1 - py) < HIT_SLOP {
+            return false; // On boundary
+        }
+        
+        // Standard even-odd: check if horizontal ray hits this edge
+        // Only count if edge crosses the ray (not just touches)
+        if (y0 > py) != (y1 > py) {
+            // Edge crosses horizontal line at py
+            let x_intersect = (x1 - x0) * (py - y0) / (y1 - y0) + x0;
+            if px < x_intersect {
+                crossings += 1;
+            }
+        }
+        j = i;
+    }
+    crossings % 2 == 1
+}
+
+// Distance from point to polygon boundary (squared)
+fn min_dist_sq_to_polygon(pt: (f32, f32), poly: &[(f32, f32)]) -> f32 {
+    if poly.len() < 2 {
+        return f32::INFINITY;
+    }
+    let (px, py) = pt;
+    let mut min_dist2 = f32::INFINITY;
+    
+    for i in 0..poly.len() {
+        let p0 = poly[i];
+        let p1 = poly[(i + 1) % poly.len()];
+        
+        // Distance from point to line segment
+        let dx = p1.0 - p0.0;
+        let dy = p1.1 - p0.1;
+        let len2 = dx * dx + dy * dy;
+        
+        if len2 < 1e-12 {
+            let d2 = (px - p0.0) * (px - p0.0) + (py - p0.1) * (py - p0.1);
+            min_dist2 = if d2 < min_dist2 { d2 } else { min_dist2 };
+            continue;
+        }
+        
+        let t = ((px - p0.0) * dx + (py - p0.1) * dy) / len2;
+        let t_clamped = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+        
+        let cx = p0.0 + t_clamped * dx;
+        let cy = p0.1 + t_clamped * dy;
+        let d2 = (px - cx) * (px - cx) + (py - cy) * (py - cy);
+        
+        min_dist2 = if d2 < min_dist2 { d2 } else { min_dist2 };
+    }
+    min_dist2
+}
+
+// Check if polygon is simple (non-self-intersecting) - quick check
+fn is_simple_polygon(poly: &[(f32, f32)]) -> bool {
+    if poly.len() < 4 {
+        return true;
+    }
+    // Quick check: if first == last, it's properly closed
+    poly.first() == poly.last()
+}
+
+// Get polygon bounding box
+fn poly_bounds(poly: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    if poly.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    let mut minx = poly[0].0;
+    let mut maxx = poly[0].0;
+    let mut miny = poly[0].1;
+    let mut maxy = poly[0].1;
+    
+    for pt in poly.iter().skip(1) {
+        if pt.0 < minx { minx = pt.0; }
+        if pt.0 > maxx { maxx = pt.0; }
+        if pt.1 < miny { miny = pt.1; }
+        if pt.1 > maxy { maxy = pt.1; }
+    }
+    (minx, miny, maxx, maxy)
 }
 
 impl Editor {
@@ -867,12 +1052,327 @@ impl Editor {
         }
     }
 
+    fn trace_face_side(
+        &self,
+        start_from: u32,
+        start_to: u32,
+        side_rule: SideRule,
+        _origin: (f32, f32),
+        gap_radius: f32,
+    ) -> TraceResult {
+        #[derive(Clone)]
+        struct TraceCandidate {
+            next: u32,
+            turn: f32,
+            is_dead: bool,
+            is_virtual: bool,
+            visited: bool,
+            he_idx: Option<u32>,
+            dist2: f32,
+        }
+
+        fn pick_candidate(cands: &[TraceCandidate], side_rule: SideRule) -> Option<usize> {
+            if cands.is_empty() {
+                return None;
+            }
+
+            let mut best_idx = 0usize;
+            for (i, cand) in cands.iter().enumerate().skip(1) {
+                let best = &cands[best_idx];
+                let better = match side_rule {
+                    SideRule::KeepLeft => {
+                        if cand.turn + 1e-6 < best.turn {
+                            true
+                        } else if absf(cand.turn - best.turn) <= 1e-6 {
+                            if cand.dist2 + 1e-4 < best.dist2 {
+                                true
+                            } else if absf(cand.dist2 - best.dist2) <= 1e-4 {
+                                if cand.next < best.next {
+                                    true
+                                } else if cand.next == best.next {
+                                    cand.he_idx < best.he_idx
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    SideRule::KeepRight => {
+                        if cand.turn > best.turn + 1e-6 {
+                            true
+                        } else if absf(cand.turn - best.turn) <= 1e-6 {
+                            if cand.dist2 + 1e-4 < best.dist2 {
+                                true
+                            } else if absf(cand.dist2 - best.dist2) <= 1e-4 {
+                                if cand.next < best.next {
+                                    true
+                                } else if cand.next == best.next {
+                                    cand.he_idx < best.he_idx
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                };
+
+                if better {
+                    best_idx = i;
+                }
+            }
+
+            Some(best_idx)
+        }
+
+        fn turn_angle(
+            vinx: f32,
+            viny: f32,
+            vinlen: f32,
+            voutx: f32,
+            vouty: f32,
+            voutlen: f32,
+        ) -> f32 {
+            if vinlen < 1e-6 || voutlen < 1e-6 {
+                return TAU;
+            }
+            let dotp = vinx * voutx + viny * vouty;
+            let crossp = vinx * vouty - viny * voutx;
+            let mut a = atan2_approx(crossp, dotp);
+            if a < 0.0 {
+                a += TAU;
+            }
+            a
+        }
+
+        let mut boundary_points: Vec<(f32, f32)> = Vec::new();
+        let mut visited_edges: Vec<(u32, u32)> = Vec::new();
+        let mut step_debug: Vec<StepDebug> = Vec::new();
+
+        if (start_from as usize) >= self.fill_graph.nodes.len()
+            || (start_to as usize) >= self.fill_graph.nodes.len()
+        {
+            return TraceResult::fail(FailReason::DeadEnd, 0, step_debug);
+        }
+
+        let mut cur_node = start_to;
+        let mut prev_node = start_from;
+
+        visited_edges.push((prev_node, cur_node));
+        let cur_pt = self.fill_graph.nodes[cur_node as usize];
+        boundary_points.push((cur_pt.x, cur_pt.y));
+
+        let max_steps = core::cmp::max(
+            8,
+            (self.fill_graph.segments.len() as u32) * 2
+                + (self.fill_graph.nodes.len() as u32),
+        );
+        let mut step_idx = 0u32;
+
+        let gap_r2 = gap_radius * gap_radius;
+
+        loop {
+            if step_idx >= max_steps {
+                return TraceResult::fail(FailReason::StepLimit, step_idx, step_debug);
+            }
+
+            let cur_pt = self.fill_graph.nodes[cur_node as usize];
+            let prev_pt = self.fill_graph.nodes[prev_node as usize];
+            let (vinx, viny, vinlen) = normalize_with_len(cur_pt.x - prev_pt.x, cur_pt.y - prev_pt.y);
+
+            let mut candidates: Vec<TraceCandidate> = Vec::new();
+
+            // Actual edges
+            if (cur_node as usize) < self.fill_graph.outgoing.len() {
+                for he_idx in self.fill_graph.outgoing[cur_node as usize].iter() {
+                    let he = self.fill_graph.half_edges[*he_idx as usize];
+                    let next_node = he.to;
+                    if next_node == prev_node {
+                        continue; // no immediate backtrack
+                    }
+                    let next_pt = self.fill_graph.nodes[next_node as usize];
+                    let (voutx, vouty, voutlen) =
+                        normalize_with_len(next_pt.x - cur_pt.x, next_pt.y - cur_pt.y);
+                    let turn = turn_angle(vinx, viny, vinlen, voutx, vouty, voutlen);
+                    let eff_deg = if (next_node as usize) < self.effective_degree.len() {
+                        self.effective_degree[next_node as usize]
+                    } else {
+                        0
+                    };
+                    let allow = if (next_node as usize) < self.allow_node.len() {
+                        self.allow_node[next_node as usize]
+                    } else {
+                        true
+                    };
+                    let is_dead = eff_deg <= 1 || !allow;
+                    let visited = visited_edges.iter().any(|e| *e == (cur_node, next_node));
+                    candidates.push(TraceCandidate {
+                        next: next_node,
+                        turn,
+                        is_dead,
+                        is_virtual: false,
+                        visited,
+                        he_idx: Some(*he_idx),
+                        dist2: distance_sq(cur_pt.x, cur_pt.y, next_pt.x, next_pt.y),
+                    });
+                }
+            }
+
+            let mut usable: Vec<TraceCandidate> = Vec::new();
+            for c in candidates.iter() {
+                let is_closure_edge = cur_node == start_from && c.next == start_to;
+                if c.visited && !is_closure_edge {
+                    continue;
+                }
+                if c.is_dead {
+                    continue;
+                }
+                usable.push(c.clone());
+            }
+
+            // Gap bridge if nothing usable
+            if usable.is_empty() {
+                let mut gap_candidates: Vec<TraceCandidate> = Vec::new();
+                let mut best_gap_dist = f32::INFINITY;
+                for (nid, node) in self.fill_graph.nodes.iter().enumerate() {
+                    let nid_u = nid as u32;
+                    if nid_u == cur_node || nid_u == prev_node {
+                        continue;
+                    }
+                    if (nid as usize) >= self.effective_degree.len() {
+                        continue;
+                    }
+                    let eff_deg = self.effective_degree[nid];
+                    let allow = if nid < self.allow_node.len() {
+                        self.allow_node[nid]
+                    } else {
+                        true
+                    };
+                    if eff_deg < 2 || !allow {
+                        continue;
+                    }
+                    let dx = node.x - cur_pt.x;
+                    let dy = node.y - cur_pt.y;
+                    let dist2 = dx * dx + dy * dy;
+                    if dist2 > gap_r2 {
+                        continue;
+                    }
+                    if dist2 + 1e-3 < best_gap_dist {
+                        best_gap_dist = dist2;
+                    }
+                    let (voutx, vouty, voutlen) = normalize_with_len(dx, dy);
+                    let turn = turn_angle(vinx, viny, vinlen, voutx, vouty, voutlen);
+                    let visited = visited_edges.iter().any(|e| *e == (cur_node, nid_u));
+                    gap_candidates.push(TraceCandidate {
+                        next: nid_u,
+                        turn,
+                        is_dead: false,
+                        is_virtual: true,
+                        visited,
+                        he_idx: None,
+                        dist2,
+                    });
+                }
+
+                if !gap_candidates.is_empty() && best_gap_dist.is_finite() {
+                    for gc in gap_candidates.into_iter() {
+                        if gc.dist2 <= best_gap_dist + 0.01 {
+                            let is_closure_edge = cur_node == start_from && gc.next == start_to;
+                            if gc.visited && !is_closure_edge {
+                                continue;
+                            }
+                            usable.push(gc);
+                        }
+                    }
+                }
+            }
+
+            if usable.is_empty() {
+                return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug);
+            }
+
+            let chosen_idx = match pick_candidate(&usable, side_rule) {
+                Some(i) => i,
+                None => return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug),
+            };
+
+            let chosen = &usable[chosen_idx];
+            let edge = (cur_node, chosen.next);
+
+            // Build step debug before mutating state
+            let mut step_cands: Vec<StepCandidateDebug> = Vec::new();
+            for cand in candidates.iter() {
+                let mut chosen_flag = false;
+                if !chosen.is_virtual && !cand.is_virtual && cand.next == chosen.next && cand.he_idx == chosen.he_idx {
+                    chosen_flag = true;
+                }
+                step_cands.push(StepCandidateDebug {
+                    next: cand.next,
+                    turn: cand.turn,
+                    is_dead: cand.is_dead,
+                    is_virtual: cand.is_virtual,
+                    was_visited: cand.visited,
+                    chosen: chosen_flag,
+                });
+            }
+            for cand in usable.iter() {
+                if cand.is_virtual {
+                    let mut chosen_flag = false;
+                    if chosen.is_virtual && cand.next == chosen.next {
+                        chosen_flag = true;
+                    }
+                    step_cands.push(StepCandidateDebug {
+                        next: cand.next,
+                        turn: cand.turn,
+                        is_dead: cand.is_dead,
+                        is_virtual: true,
+                        was_visited: cand.visited,
+                        chosen: chosen_flag,
+                    });
+                }
+            }
+            step_debug.push(StepDebug {
+                step_idx,
+                cur: cur_node,
+                prev: prev_node,
+                vin: (vinx, viny),
+                candidates: step_cands,
+            });
+
+            if edge == (start_from, start_to) && step_idx >= 1 {
+                return TraceResult::success(boundary_points, step_idx + 1, step_debug);
+            }
+
+            if visited_edges.iter().any(|e| *e == edge) {
+                return TraceResult::fail(FailReason::PrematureCycle, step_idx, step_debug);
+            }
+
+            visited_edges.push(edge);
+            let next_pt = self.fill_graph.nodes[chosen.next as usize];
+            boundary_points.push((next_pt.x, next_pt.y));
+
+            prev_node = cur_node;
+            cur_node = chosen.next;
+            step_idx += 1;
+        }
+    }
+
     fn fill_debug_at(&mut self, ox: f32, oy: f32) {
         self.fill_trace_buf.clear();
-        self.fill_candidates_buf.clear();
-        self.node_outgoing_buf.clear();
         self.fill_walk_debug_buf.clear();
+        self.fill_candidates_buf.clear();
+        self.adjacency_debug_buf.clear();
         self.build_fill_graph();
+
+        // trace count placeholder for step debug log
+        self.fill_candidates_buf.push(0.0);
 
         // Step 0: origin
         self.fill_trace_buf.push(ox);
@@ -884,10 +1384,11 @@ impl Editor {
             result.push((self.fill_trace_buf.len() / 3) as f32);
             result.extend(self.fill_trace_buf.drain(..));
             self.fill_trace_buf = result;
+            self.fill_candidates_buf[0] = 0.0;
             return;
         }
 
-        // Pick starting sector nearest to origin (midpoint distance)
+        // Pick starting sector nearest to origin
         let mut best_seg_idx = 0usize;
         let mut best_dist2 = f32::INFINITY;
         for (i, seg) in self.fill_graph.segments.iter().enumerate() {
@@ -903,188 +1404,215 @@ impl Editor {
         }
 
         let start_seg = self.fill_graph.segments[best_seg_idx];
-        let pa = self.fill_graph.nodes[start_seg.a as usize];
-        let pb = self.fill_graph.nodes[start_seg.b as usize];
-        let dist_a = distance_sq(ox, oy, pa.x, pa.y);
-        let dist_b = distance_sq(ox, oy, pb.x, pb.y);
+        let node_a = start_seg.a;
+        let node_b = start_seg.b;
 
-        let mut cur_node = if dist_a <= dist_b { start_seg.a } else { start_seg.b };
-        let mut prev_node = if cur_node == start_seg.a { start_seg.b } else { start_seg.a };
-        let mut cur_sector = best_seg_idx as u32;
-        let start_prev = prev_node;
-        let start_cur = cur_node;
+        let pa = self.fill_graph.nodes[node_a as usize];
+        let pb = self.fill_graph.nodes[node_b as usize];
+        let cross_ab = cross(pb.x - pa.x, pb.y - pa.y, ox - pa.x, oy - pa.y);
+        let cross_ba = cross(pa.x - pb.x, pa.y - pb.y, ox - pb.x, oy - pb.y);
+        let side_ab = if cross_ab > 0.0 { SideRule::KeepLeft } else { SideRule::KeepRight };
+        let side_ba = if cross_ba > 0.0 { SideRule::KeepLeft } else { SideRule::KeepRight };
+        let origin = (ox, oy);
 
-        // Trace start node
-        let cur_pt = self.fill_graph.nodes[cur_node as usize];
-        self.fill_trace_buf.push(cur_pt.x);
-        self.fill_trace_buf.push(cur_pt.y);
-        self.fill_trace_buf.push(2.0); // start node
+        // DUAL-TRACE: Try both directions with side-locking
+        let result_ab = self.trace_face_side(node_a, node_b, side_ab, origin, GAP_RADIUS);
+        let result_ba = self.trace_face_side(node_b, node_a, side_ba, origin, GAP_RADIUS);
 
-        let mut visited_edges: Vec<(u32, u32)> = Vec::new();
-        visited_edges.push((prev_node, cur_node));
+        let origin = (ox, oy);
 
-        let max_steps = (self.fill_graph.segments.len() as u32) * 2 + 2;
-        let mut step_idx = 0u32;
-
-        loop {
-            if step_idx >= max_steps {
-                // step limit
-                let pt = self.fill_graph.nodes[cur_node as usize];
-                self.fill_trace_buf.push(pt.x);
-                self.fill_trace_buf.push(pt.y);
-                self.fill_trace_buf.push(7.0); // step limit
-                break;
-            }
-
-            let cur_pt = self.fill_graph.nodes[cur_node as usize];
-            let prev_pt = self.fill_graph.nodes[prev_node as usize];
-            let vin = (cur_pt.x - prev_pt.x, cur_pt.y - prev_pt.y);
-            let (vinx, viny, vinlen) = normalize_with_len(vin.0, vin.1);
-
-            // Candidate sectors: those attached to cur_node excluding the sector we came from
-            let mut step_block: Vec<f32> = Vec::new();
-            let cur_deg = if (cur_node as usize) < self.node_degree.len() { self.node_degree[cur_node as usize] } else { 0 };
-
-            let sectors_here = if (cur_node as usize) < self.fill_graph.node_sectors.len() {
-                self.fill_graph.node_sectors[cur_node as usize].clone()
-            } else {
-                Vec::new()
-            };
-
-            // Compute turn angle for each candidate: smallest positive turn = keep-left rule
-            // This ensures consistent CCW boundary following
-            let mut candidates_info: Vec<(u32, u32, u32, bool, f32)> = Vec::new(); // (sector_id, next_node, next_deg, is_dead, turn_angle)
-            for sid in sectors_here.iter() {
-                if *sid == cur_sector {
-                    continue;
-                }
-                let seg = self.fill_graph.segments[*sid as usize];
-                let next_node = other_end(&seg, cur_node);
-                let next_deg_total = if (next_node as usize) < self.node_degree.len() {
-                    self.node_degree[next_node as usize]
-                } else { 0 };
-
-                let attached = if (next_node as usize) < self.fill_graph.node_sectors.len() {
-                    self.fill_graph.node_sectors[next_node as usize].len()
-                } else { 0 };
-                let cnt_without_back = if attached > 0 { attached - 1 } else { 0 };
-                let is_dead = next_deg_total <= 1 || cnt_without_back == 0;
-
-                let next_pt = self.fill_graph.nodes[next_node as usize];
-                let (voutx, vouty, voutlen) = normalize_with_len(next_pt.x - cur_pt.x, next_pt.y - cur_pt.y);
-                
-                // Compute signed turn angle from incoming to outgoing vector
-                // turn = atan2(cross(vin,vout), dot(vin,vout)) normalized to [0, 2π)
-                // Smallest positive turn = keep-left rule for CCW boundary traversal
-                let angle = if vinlen < 1e-6 || voutlen < 1e-6 {
-                    0.0
-                } else {
-                    let dotp = vinx * voutx + viny * vouty;
-                    let crossp = vinx * vouty - viny * voutx;
-                    let mut a = atan2_approx(crossp, dotp);
-                    if a < 0.0 { a += TAU; }
-                    a
-                };
-
-                candidates_info.push((*sid, next_node, next_deg_total, is_dead, angle));
-            }
-
-            // Choose candidate: filter dead-ends, then pick smallest turn angle
-            // Tie-break: smallest next node id for determinism
-            let mut usable: Vec<(u32, u32, u32, bool, f32)> = Vec::new();
-            for c in candidates_info.iter() {
-                if !c.3 {
-                    usable.push(*c);
+        // Debug log: start direction and side
+        let mut trace_counter = 0u32;
+        {
+            let side_code = if let SideRule::KeepLeft = side_ab { 0.0 } else { 1.0 };
+            trace_counter += 1;
+            self.fill_candidates_buf.push(trace_counter as f32);
+            self.fill_candidates_buf.push(node_a as f32);
+            self.fill_candidates_buf.push(node_b as f32);
+            self.fill_candidates_buf.push(side_code);
+            self.fill_candidates_buf.push(cross_ab);
+            self.fill_candidates_buf.push(if result_ab.closed { 1.0 } else { 0.0 });
+            self.fill_candidates_buf.push(result_ab.steps as f32);
+            self.fill_candidates_buf.push(result_ab.step_debug.len() as f32);
+            for step in result_ab.step_debug.iter() {
+                self.fill_candidates_buf.push(step.step_idx as f32);
+                self.fill_candidates_buf.push(step.cur as f32);
+                self.fill_candidates_buf.push(step.prev as f32);
+                self.fill_candidates_buf.push(step.vin.0);
+                self.fill_candidates_buf.push(step.vin.1);
+                self.fill_candidates_buf.push(step.candidates.len() as f32);
+                for cand in step.candidates.iter() {
+                    self.fill_candidates_buf.push(cand.next as f32);
+                    self.fill_candidates_buf.push(cand.turn);
+                    self.fill_candidates_buf.push(if cand.is_dead { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.is_virtual { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.was_visited { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.chosen { 1.0 } else { 0.0 });
                 }
             }
-
-            let mut chosen: Option<(u32, u32)> = None; // (sector, next_node)
-            if usable.len() == 1 {
-                chosen = Some((usable[0].0, usable[0].1));
-            } else if usable.len() > 1 {
-                usable.sort_by(|a, b| {
-                    if absf(a.4 - b.4) > 1e-6 {
-                        if a.4 < b.4 { core::cmp::Ordering::Less } else { core::cmp::Ordering::Greater }
-                    } else {
-                        a.1.cmp(&b.1)
-                    }
-                });
-                chosen = Some((usable[0].0, usable[0].1));
-            }
-
-            // Log step
-            step_block.push(step_idx as f32);
-            step_block.push(cur_pt.x);
-            step_block.push(cur_pt.y);
-            step_block.push(prev_pt.x);
-            step_block.push(prev_pt.y);
-            step_block.push(cur_deg as f32);
-            step_block.push(candidates_info.len() as f32);
-
-            for c in candidates_info.iter() {
-                let next_pt = self.fill_graph.nodes[c.1 as usize];
-                let is_chosen = if let Some((sid, _)) = chosen { sid == c.0 } else { false };
-                step_block.push(next_pt.x);
-                step_block.push(next_pt.y);
-                step_block.push(c.2 as f32);
-                step_block.push(if c.3 { 1.0 } else { 0.0 });
-                step_block.push(c.4);
-                step_block.push(if is_chosen { 1.0 } else { 0.0 });
-            }
-
-            self.fill_walk_debug_buf.extend(step_block.into_iter());
-
-            if chosen.is_none() {
-                // Dead end: no non-dead candidates
-                self.fill_trace_buf.push(cur_pt.x);
-                self.fill_trace_buf.push(cur_pt.y);
-                self.fill_trace_buf.push(8.0);
-                break;
-            }
-
-            let (chosen_sector, next_node) = chosen.unwrap();
-
-            // Cycle detection: stop if we've traversed this directed edge before
-            // This means we've completed a closed face boundary
-            let edge = (cur_node, next_node);
-            let mut seen = false;
-            for e in visited_edges.iter() {
-                if *e == edge {
-                    seen = true;
-                    break;
-                }
-            }
-            if seen || (cur_node == start_prev && next_node == start_cur) {
-                let pt = self.fill_graph.nodes[next_node as usize];
-                self.fill_trace_buf.push(pt.x);
-                self.fill_trace_buf.push(pt.y);
-                self.fill_trace_buf.push(9.0);
-                
-                // Success! Create a polygon from the traced path
-                self.create_polygon_from_trace();
-                break;
-            }
-
-            visited_edges.push(edge);
-
-            let next_pt = self.fill_graph.nodes[next_node as usize];
-            self.fill_trace_buf.push(next_pt.x);
-            self.fill_trace_buf.push(next_pt.y);
-            self.fill_trace_buf.push(3.0);
-
-            prev_node = cur_node;
-            cur_node = next_node;
-            cur_sector = chosen_sector;
-            step_idx += 1;
         }
 
-        // Prepend count
-        let mut result = Vec::new();
-        result.push((self.fill_trace_buf.len() / 3) as f32);
-        result.extend(self.fill_trace_buf.drain(..));
-        self.fill_trace_buf = result;
+        {
+            let side_code = if let SideRule::KeepLeft = side_ba { 0.0 } else { 1.0 };
+            trace_counter += 1;
+            self.fill_candidates_buf.push(trace_counter as f32);
+            self.fill_candidates_buf.push(node_b as f32);
+            self.fill_candidates_buf.push(node_a as f32);
+            self.fill_candidates_buf.push(side_code);
+            self.fill_candidates_buf.push(cross_ba);
+            self.fill_candidates_buf.push(if result_ba.closed { 1.0 } else { 0.0 });
+            self.fill_candidates_buf.push(result_ba.steps as f32);
+            self.fill_candidates_buf.push(result_ba.step_debug.len() as f32);
+            for step in result_ba.step_debug.iter() {
+                self.fill_candidates_buf.push(step.step_idx as f32);
+                self.fill_candidates_buf.push(step.cur as f32);
+                self.fill_candidates_buf.push(step.prev as f32);
+                self.fill_candidates_buf.push(step.vin.0);
+                self.fill_candidates_buf.push(step.vin.1);
+                self.fill_candidates_buf.push(step.candidates.len() as f32);
+                for cand in step.candidates.iter() {
+                    self.fill_candidates_buf.push(cand.next as f32);
+                    self.fill_candidates_buf.push(cand.turn);
+                    self.fill_candidates_buf.push(if cand.is_dead { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.is_virtual { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.was_visited { 1.0 } else { 0.0 });
+                    self.fill_candidates_buf.push(if cand.chosen { 1.0 } else { 0.0 });
+                }
+            }
+        }
+
+        if !self.fill_candidates_buf.is_empty() {
+            self.fill_candidates_buf[0] = trace_counter as f32;
+        }
+
+        // COMPUTE DIAGNOSTICS for both candidates
+        let diag_ab = if result_ab.closed && result_ab.points.len() >= 3 {
+            let area = absf(signed_area_2x(&result_ab.points)) * 0.5;
+            let inside = point_in_poly_evenodd(origin, &result_ab.points);
+            let dist_sq = min_dist_sq_to_polygon(origin, &result_ab.points);
+            let (minx, miny, maxx, maxy) = poly_bounds(&result_ab.points);
+            let is_simple = is_simple_polygon(&result_ab.points);
+            Some((1.0, result_ab.points.len() as f32, absf(signed_area_2x(&result_ab.points)), area, 
+                  if inside { 1.0 } else { 0.0 }, dist_sq, sqrt_approx(dist_sq), 
+                  if is_simple { 1.0 } else { 0.0 }, minx, miny, maxx, maxy, inside, area))
+        } else {
+            None
+        };
+
+        let diag_ba = if result_ba.closed && result_ba.points.len() >= 3 {
+            let area = absf(signed_area_2x(&result_ba.points)) * 0.5;
+            let inside = point_in_poly_evenodd(origin, &result_ba.points);
+            let dist_sq = min_dist_sq_to_polygon(origin, &result_ba.points);
+            let (minx, miny, maxx, maxy) = poly_bounds(&result_ba.points);
+            let is_simple = is_simple_polygon(&result_ba.points);
+            Some((2.0, result_ba.points.len() as f32, absf(signed_area_2x(&result_ba.points)), area,
+                  if inside { 1.0 } else { 0.0 }, dist_sq, sqrt_approx(dist_sq),
+                  if is_simple { 1.0 } else { 0.0 }, minx, miny, maxx, maxy, inside, area))
+        } else {
+            None
+        };
+
+        // Store diagnostics for visualization
+        if let Some(d) = &diag_ab {
+            self.fill_walk_debug_buf.clear();
+            self.fill_walk_debug_buf.push(d.0); // direction
+            self.fill_walk_debug_buf.push(d.1); // points.len
+            self.fill_walk_debug_buf.push(d.2); // signed_area*2
+            self.fill_walk_debug_buf.push(d.3); // area
+            self.fill_walk_debug_buf.push(d.4); // inside
+            self.fill_walk_debug_buf.push(d.5); // dist_sq
+            self.fill_walk_debug_buf.push(d.6); // dist
+            self.fill_walk_debug_buf.push(d.7); // is_simple
+            self.fill_walk_debug_buf.push(d.8); // minx
+            self.fill_walk_debug_buf.push(d.9); // miny
+            self.fill_walk_debug_buf.push(d.10); // maxx
+            self.fill_walk_debug_buf.push(d.11); // maxy
+        }
+        if let Some(d) = &diag_ba {
+            self.fill_walk_debug_buf.push(d.0);
+            self.fill_walk_debug_buf.push(d.1);
+            self.fill_walk_debug_buf.push(d.2);
+            self.fill_walk_debug_buf.push(d.3);
+            self.fill_walk_debug_buf.push(d.4);
+            self.fill_walk_debug_buf.push(d.5);
+            self.fill_walk_debug_buf.push(d.6);
+            self.fill_walk_debug_buf.push(d.7);
+            self.fill_walk_debug_buf.push(d.8);
+            self.fill_walk_debug_buf.push(d.9);
+            self.fill_walk_debug_buf.push(d.10);
+            self.fill_walk_debug_buf.push(d.11);
+        }
+
+        // Validate results
+        let mut valid_results: Vec<(bool, bool, f32, &TraceResult)> = Vec::new();
+
+        if result_ab.closed && result_ab.points.len() >= 3 {
+            let area = absf(signed_area_2x(&result_ab.points)) * 0.5;
+            let inside = point_in_poly_evenodd(origin, &result_ab.points);
+            if area > MIN_AREA && inside {
+                valid_results.push((true, inside, area, &result_ab));
+            }
+        }
+
+        if result_ba.closed && result_ba.points.len() >= 3 {
+            let area = absf(signed_area_2x(&result_ba.points)) * 0.5;
+            let inside = point_in_poly_evenodd(origin, &result_ba.points);
+            if area > MIN_AREA && inside {
+                valid_results.push((true, inside, area, &result_ba));
+            }
+        }
+
+        // Selection logic
+        let selected: Option<&TraceResult> = if valid_results.is_empty() {
+            None
+        } else if valid_results.len() == 1 {
+            Some(valid_results[0].3)
+        } else {
+            let inside_results: Vec<_> = valid_results.iter().filter(|(_, inside, _, _)| *inside).collect();
+            if !inside_results.is_empty() {
+                inside_results.iter().min_by(|a, b| {
+                    let a_area = a.2;
+                    let b_area = b.2;
+                    if a_area < b_area { core::cmp::Ordering::Less } else { core::cmp::Ordering::Greater }
+                }).map(|x| x.3)
+            } else {
+                Some(valid_results[0].3)
+            }
+        };
+
+        // Log and create polygon
+        if let Some(sel) = selected {
+            let pt_a = self.fill_graph.nodes[node_a as usize];
+            self.fill_trace_buf.push(pt_a.x);
+            self.fill_trace_buf.push(pt_a.y);
+            self.fill_trace_buf.push(2.0);
+            
+            for pt in sel.points.iter().skip(1) {
+                self.fill_trace_buf.push(pt.0);
+                self.fill_trace_buf.push(pt.1);
+                self.fill_trace_buf.push(3.0);
+            }
+
+            self.fill_trace_buf.push(pt_a.x);
+            self.fill_trace_buf.push(pt_a.y);
+            self.fill_trace_buf.push(9.0);
+
+            let mut result = Vec::new();
+            result.push((self.fill_trace_buf.len() / 3) as f32);
+            result.extend(self.fill_trace_buf.drain(..));
+            self.fill_trace_buf = result;
+            
+            self.create_polygon_from_selected(&sel.points);
+        } else {
+            let mut result = Vec::new();
+            result.push((self.fill_trace_buf.len() / 3) as f32);
+            result.extend(self.fill_trace_buf.drain(..));
+            self.fill_trace_buf = result;
+        }
     }
 
+
+    #[allow(dead_code)]
     fn create_polygon_from_trace(&mut self) {
         // Extract polygon points from fill_trace_buf
         // Only include boundary points: step_type 2.0 (start node) and 3.0 (chain points)
@@ -1119,6 +1647,24 @@ impl Editor {
         }
 
         if polygon.points.len() >= 4 {
+            self.fills.push(polygon);
+            self.refresh_export_fills();
+        }
+    }
+
+    fn create_polygon_from_selected(&mut self, points: &[(f32, f32)]) {
+        // Create polygon directly from selected TraceResult points
+        let mut polygon = Polygon::new();
+        polygon.color = self.fill_color;
+        
+        if points.len() >= 3 {
+            polygon.points = points.to_vec();
+            
+            // Ensure closure
+            if polygon.points.len() >= 3 && polygon.points.first() != polygon.points.last() {
+                polygon.points.push(polygon.points[0]);
+            }
+            
             self.fills.push(polygon);
             self.refresh_export_fills();
         }

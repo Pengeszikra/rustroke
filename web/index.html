@@ -106,6 +106,26 @@
       fill: #ef4444;
       r: 3;
     }
+    #fillDebugLayer {
+      pointer-events: none;
+    }
+    #fillDebugLayer polygon {
+      stroke-width: 2;
+      fill-opacity: 0.2;
+    }
+    #fillDebugLayer .candidate-ab {
+      stroke: #9333ea;
+      fill: #9333ea;
+    }
+    #fillDebugLayer .candidate-ba {
+      stroke: #f97316;
+      fill: #f97316;
+    }
+    #fillDebugLayer .selected-fill {
+      stroke: #22c55e;
+      stroke-width: 3;
+      fill: none;
+    }
     #status {
       font-size: 12px;
       color: #666;
@@ -143,6 +163,7 @@
         <line id="debugRay"></line>
         <g id="debugIntersections"></g>
         <g id="fillTraceLayer" pointer-events="none"></g>
+        <g id="fillDebugLayer"></g>
       </g>
     </svg>
 
@@ -168,6 +189,7 @@
     const debugIntersectionsGroup = document.getElementById('debugIntersections');
     const fillTraceLayer = document.getElementById('fillTraceLayer');
     const graphDebugLayer = document.getElementById('graphDebugLayer');
+    const fillDebugLayer = document.getElementById('fillDebugLayer');
     const viewBox = canvas.viewBox.baseVal;
 
     let wasm = null;
@@ -285,9 +307,57 @@
     }
 
     /**
+     * Render fill debug diagnostics (both candidate polygons)
+     */
+    function renderFillDebug() {
+      fillDebugLayer.replaceChildren();
+      
+      if (!wasm) return;
+      
+      // Get fill walk debug data
+      const len = wasm.editor_fill_walk_debug_len_f32();
+      const ptr = wasm.editor_fill_walk_debug_ptr_f32();
+      
+      if (len < 12 || !ptr) {
+        return;
+      }
+      
+      const arr = new Float32Array(wasm.memory.buffer, ptr, len);
+      
+      // Parse diagnostic data for up to 2 candidates (12 floats each)
+      const candidates = [];
+      let idx = 0;
+      while (idx + 12 <= len) {
+        const direction = Math.floor(arr[idx]);
+        const pointCount = Math.floor(arr[idx + 1]);
+        const signedArea = arr[idx + 2];
+        const area = arr[idx + 3];
+        const inside = arr[idx + 4] > 0.5;
+        const distSq = arr[idx + 5];
+        const dist = arr[idx + 6];
+        const isSimple = arr[idx + 7] > 0.5;
+        const minx = arr[idx + 8];
+        const miny = arr[idx + 9];
+        const maxx = arr[idx + 10];
+        const maxy = arr[idx + 11];
+        
+        candidates.push({direction, pointCount, area, inside, dist, isSimple});
+        idx += 12;
+      }
+      
+      // Log to console
+      if (candidates.length > 0) {
+        console.log('[Fill Debug] Candidate AB:', candidates[0]);
+        if (candidates.length > 1) {
+          console.log('[Fill Debug] Candidate BA:', candidates[1]);
+        }
+      }
+    }
+
+    /**
      * Render fill trace from WASM buffer
      */
-    function renderFillTrace() {
+     function renderFillTrace() {
       fillTraceLayer.replaceChildren();
 
       if (!wasm) return;
@@ -707,6 +777,7 @@
         wasm.editor_set_fill_color(colorPtr, colorBytes.length);
         wasm.editor_fill_debug_at(point.x, point.y);
         renderFillTrace();
+        renderFillDebug();
         renderFromWasm();
       } else {
         startPoint = point;
