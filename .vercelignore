@@ -1,0 +1,28 @@
+# Rust build artifacts
+target/
+*.rs.bk
+
+# Legacy WASM files (we use web/wasm/ instead)
+web/rust-svg-editor.wasm
+web/rust_svg_editor.wasm
+
+# Development
+.DS_Store
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed for deployment)
+*.md
+!README.md
+
+# Source code (only built artifacts needed)
+src/
+Cargo.toml
+Cargo.lock
+.cargo/
+
+# Build scripts
+build_and_serve.sh

@@ -1,5 +1,8 @@
 target/
 web/rust-svg-editor.wasm
+web/rust_svg_editor.wasm
 .DS_Store
 *.log
 node_modules/
+dist/
+.vercel/
