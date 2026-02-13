@@ -7,10 +7,11 @@
   <link rel="icon" type="image/x-icon" href="favicon.ico">
   <style>
     :root {
-      --ink: #0f172a;
-      --paper: #f5f6fb;
-      --accent: #2dd4bf;
-      --accent-dark: #0ea5e9;
+      --ink: #000000;
+      --paper: #424242;
+      --canvas-bg: #ABABAB;
+      --accent: #87ceeb;
+      --accent-dark: #5fa8d3;
     }
     * { box-sizing: border-box; }
     body {
@@ -18,7 +19,7 @@
       margin: 0;
       padding: 20px;
       background: var(--paper);
-      color: var(--ink);
+      color: #ffffff;
     }
     .container {
       max-width: 1200px;
@@ -32,20 +33,29 @@
       gap: 10px;
       flex-wrap: wrap;
     }
-    h1 { margin: 0; font-size: 24px; }
+    h1 { 
+      margin: 0; 
+      font-size: 24px;
+      color: var(--accent);
+      text-transform: lowercase;
+      user-select: none;
+    }
     button {
       background: var(--accent);
-      color: white;
+      color: #424242;
       border: none;
       padding: 8px 16px;
       border-radius: 4px;
       cursor: pointer;
       font-size: 14px;
+      font-weight: 500;
       transition: background 0.2s;
+      user-select: none;
     }
     button:hover { background: var(--accent-dark); }
     button.active {
       background: #ef4444;
+      color: white;
     }
     input[type="color"] {
       width: 40px;
@@ -55,8 +65,8 @@
       cursor: pointer;
     }
     svg {
-      border: 1px solid #ddd;
-      background: white;
+      border: 1px solid #333;
+      background: var(--canvas-bg);
       border-radius: 4px;
       display: block;
       margin-bottom: 20px;
@@ -128,7 +138,7 @@
     }
     #status {
       font-size: 12px;
-      color: #666;
+      color: #ABABAB;
       margin-top: 10px;
     }
   </style>
@@ -136,7 +146,7 @@
 <body>
   <div class="container">
     <header>
-      <h1>Rustroke</h1>
+      <h1>rustroke</h1>
       <div style="display: flex; gap: 10px; flex-wrap: wrap;">
         <button id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
         <button id="clearBtn" title="Clear">Clear</button>
