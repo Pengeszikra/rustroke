@@ -14,6 +14,7 @@ async function main() {
     const preview = document.getElementById('preview');
     const undoBtn = document.getElementById('undoBtn');
     const clearBtn = document.getElementById('clearBtn');
+    const cleanBtn = document.getElementById('cleanBtn');
     const fillBtn = document.getElementById('fillBtn');
     const fillColor = document.getElementById('fillColor');
     const addFrameBtn = document.getElementById('addFrameBtn');
@@ -120,8 +121,23 @@ async function main() {
           colorView.set(colorBytes);
           wasm.editor_set_fill_color(colorPtr, colorBytes.length);
           
+          // Check fills count before
+          const fillsBefore = wasm.editor_fills_count();
+          
           // Use fill_debug_at which uses the fill graph system and creates the fill
           wasm.editor_fill_debug_at(x, y);
+          
+          // Check if fill was created
+          const fillsAfter = wasm.editor_fills_count();
+          const fillCreated = fillsAfter > fillsBefore;
+          
+          // If no fill was created, turn off fill mode
+          if (!fillCreated && fillMode) {
+            fillMode = false;
+            fillBtn.classList.remove('active');
+            canvas.style.cursor = 'default';
+            console.log('[Fill] No area found, fill mode disabled');
+          }
           
           renderFromWasm();
           
@@ -143,6 +159,24 @@ async function main() {
           renderFillTrace();
           break;
         }
+        case "Clean": {
+          wasm.editor_cleanup_overhangs();
+          
+          // Read debug buffer (contains: total, deleted, kept, nodes)
+          const debugLen = wasm.editor_debug_len_f32();
+          if (debugLen >= 4) {
+            const debugPtr = wasm.editor_debug_ptr_f32();
+            const debugArr = new Float32Array(wasm.memory.buffer, debugPtr, 4);
+            const total = Math.round(debugArr[0]);
+            const deleted = Math.round(debugArr[1]);
+            const kept = Math.round(debugArr[2]);
+            const nodes = Math.round(debugArr[3]);
+            console.log(`[Overhang] segmentsBefore=${total} deleted=${deleted} kept=${kept} nodes=${nodes}`);
+          }
+          
+          renderFromWasm();
+          break;
+        }
         case "SetFillColor": {
           const {color} = action.data;
           fillColor.value = color;
@@ -156,7 +190,7 @@ async function main() {
         case "ToggleShowLines": {
           const {show} = action.data;
           showLines = show;
-          toggleLinesBtn.textContent = showLines ? 'Hide Lines' : 'Show Lines';
+          toggleLinesBtn.textContent = showLines ? 'Hide' : 'Show';
           console.log('[UI] showLines =', showLines);
           renderFromWasm();
           break;
@@ -184,7 +218,7 @@ async function main() {
      * Shows preview line animating from start to end
      */
     function animateLineStroke(x1, y1, x2, y2, onComplete) {
-      const duration = 200; // ms to animate stroke
+      const duration = 200 / 7; // ms to animate stroke (7x faster)
       const startTime = performance.now();
       
       // Show preview line
@@ -301,16 +335,17 @@ async function main() {
       // Clear scene before playback
       dispatch({type: "Clear", data: {}}, {source: "playback"});
       
-      console.log(`[Playback] Starting - ${events.length} events`);
+      console.log(`[Playback] Starting - ${events.length} events at 7x speed`);
       
       const startTime = performance.now();
+      const speedMultiplier = 7; // 7x speed
       
       // Play events sequentially
       for (let i = 0; i < events.length; i++) {
         if (!isPlaying) break; // Check if stopped
         
         const event = events[i];
-        const targetTime = event.t;
+        const targetTime = event.t / speedMultiplier; // Divide by 7 for 7x speed
         const currentTime = performance.now() - startTime;
         const delay = Math.max(0, targetTime - currentTime);
         
@@ -1173,6 +1208,12 @@ async function main() {
     clearBtn.addEventListener('click', () => {
       if (wasm) {
         dispatch({type: "Clear", data: {}}, {source: "user"});
+      }
+    });
+
+    cleanBtn.addEventListener('click', () => {
+      if (wasm) {
+        dispatch({type: "Clean", data: {}}, {source: "user"});
       }
     });
 

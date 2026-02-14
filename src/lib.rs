@@ -230,6 +230,7 @@ enum Command {
     AddFill,
     AddFrame, // Grouped undo for 4 frame lines
     Clear(Vec<Line>, Vec<Polygon>),
+    CleanOverhangs(Vec<Line>), // Save previous lines before cleanup
 }
 
 fn distance_sq(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
@@ -1958,6 +1959,159 @@ impl Editor {
         self.build_fill_graph();
     }
 
+    // Overhang trimming = 2-core leaf stripping on cut-segment graph
+    fn cleanup_overhangs(&mut self) {
+        // Save current state for undo
+        let previous_lines = self.lines.clone();
+        
+        if self.lines.is_empty() {
+            return;
+        }
+        
+        // Build the cut segment graph (same as fill uses)
+        self.recompute_intersections();
+        self.build_fill_graph();
+        
+        let graph = &self.fill_graph;
+        let total_segments = graph.segments.len();
+        
+        if total_segments == 0 {
+            return;
+        }
+        
+        // Compute initial node degrees from segments
+        let mut degree: Vec<u32> = Vec::new();
+        degree.resize(graph.nodes.len(), 0);
+        
+        for seg in &graph.segments {
+            let a_idx = seg.a as usize;
+            let b_idx = seg.b as usize;
+            if a_idx < degree.len() {
+                degree[a_idx] += 1;
+            }
+            if b_idx < degree.len() {
+                degree[b_idx] += 1;
+            }
+        }
+        
+        // Initialize queue with all nodes where degree <= 1 (leaves and isolated)
+        let mut queue: Vec<usize> = Vec::new();
+        for (node_idx, &deg) in degree.iter().enumerate() {
+            if deg <= 1 {
+                queue.push(node_idx);
+            }
+        }
+        
+        // Mark segments for deletion via 2-core leaf stripping
+        let mut delete_segment: Vec<bool> = Vec::new();
+        delete_segment.resize(total_segments, false);
+        let mut deleted_count: u32 = 0;
+        
+        while let Some(node_idx) = queue.pop() {
+            // Re-check degree (may have changed)
+            if degree[node_idx] > 1 {
+                continue;
+            }
+            
+            if degree[node_idx] == 0 {
+                // Isolated node, nothing to do
+                continue;
+            }
+            
+            // degree[node_idx] == 1: find the single alive segment
+            let mut alive_segment_idx: Option<usize> = None;
+            for (seg_idx, &is_deleted) in delete_segment.iter().enumerate() {
+                if is_deleted {
+                    continue;
+                }
+                let seg = &graph.segments[seg_idx];
+                let a_idx = seg.a as usize;
+                let b_idx = seg.b as usize;
+                if a_idx == node_idx || b_idx == node_idx {
+                    alive_segment_idx = Some(seg_idx);
+                    break;
+                }
+            }
+            
+            if let Some(seg_idx) = alive_segment_idx {
+                let seg = &graph.segments[seg_idx];
+                let a_idx = seg.a as usize;
+                let b_idx = seg.b as usize;
+                let other_idx = if a_idx == node_idx { b_idx } else { a_idx };
+                
+                // Mark segment for deletion
+                delete_segment[seg_idx] = true;
+                deleted_count += 1;
+                
+                // Update degrees
+                degree[node_idx] = 0;
+                if other_idx < degree.len() && degree[other_idx] > 0 {
+                    degree[other_idx] -= 1;
+                    // If other node becomes a leaf, add to queue
+                    if degree[other_idx] <= 1 {
+                        queue.push(other_idx);
+                    }
+                }
+            }
+        }
+        
+        let kept_count = total_segments - (deleted_count as usize);
+        
+        // Store debug info (can be logged in debug mode)
+        // Using existing debug buffer or could create new one
+        self.debug_buf.clear();
+        self.debug_buf.push(total_segments as f32);
+        self.debug_buf.push(deleted_count as f32);
+        self.debug_buf.push(kept_count as f32);
+        self.debug_buf.push(graph.nodes.len() as f32);
+        
+        if deleted_count == 0 {
+            // No changes - don't push undo
+            return;
+        }
+        
+        // Collect all KEPT segments as new lines
+        let mut new_lines: Vec<Line> = Vec::new();
+        
+        for (seg_idx, &is_deleted) in delete_segment.iter().enumerate() {
+            if is_deleted {
+                continue;
+            }
+            
+            if seg_idx >= graph.segments.len() {
+                continue;
+            }
+            
+            let seg = &graph.segments[seg_idx];
+            let a_idx = seg.a as usize;
+            let b_idx = seg.b as usize;
+            
+            if a_idx >= graph.nodes.len() || b_idx >= graph.nodes.len() {
+                continue;
+            }
+            
+            let node_a = &graph.nodes[a_idx];
+            let node_b = &graph.nodes[b_idx];
+            
+            new_lines.push(Line {
+                x1: node_a.x,
+                y1: node_a.y,
+                x2: node_b.x,
+                y2: node_b.y,
+            });
+        }
+        
+        // Update lines with trimmed segments
+        self.lines = new_lines;
+        
+        // Push undo command
+        self.history.push(Command::CleanOverhangs(previous_lines));
+        
+        // Refresh everything
+        self.refresh_export();
+        self.recompute_intersections();
+        self.build_fill_graph();
+    }
     fn undo(&mut self) {
         match self.history.pop() {
             Some(Command::Add) => {
@@ -1975,6 +2129,9 @@ impl Editor {
             Some(Command::Clear(previous_lines, previous_fills)) => {
                 self.lines = previous_lines;
                 self.fills = previous_fills;
+            }
+            Some(Command::CleanOverhangs(previous_lines)) => {
+                self.lines = previous_lines;
             }
             None => {}
         }
@@ -2123,6 +2280,13 @@ pub extern "C" fn editor_clear() {
 }
 
 #[no_mangle]
+pub extern "C" fn editor_cleanup_overhangs() {
+    if let Some(editor) = editor_mut() {
+        editor.cleanup_overhangs();
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn editor_line_count() -> u32 {
     editor_ref().map(|e| e.line_count()).unwrap_or(0)
 }
@@ -2224,6 +2388,11 @@ pub extern "C" fn editor_fill_debug_at(ox: f32, oy: f32) {
     if let Some(editor) = editor_mut() {
         editor.fill_debug_at(ox, oy);
     }
+}
+
+#[no_mangle]
+pub extern "C" fn editor_fills_count() -> u32 {
+    editor_ref().map(|e| e.fills.len() as u32).unwrap_or(0)
 }
 
 #[no_mangle]
