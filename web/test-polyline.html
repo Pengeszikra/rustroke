@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polyline Mode Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #2a2a2a;
+      color: #fff;
+    }
+    #status {
+      margin: 20px 0;
+      padding: 10px;
+      background: #1a1a1a;
+      border-left: 4px solid #4CAF50;
+    }
+    .test {
+      margin: 10px 0;
+      padding: 5px;
+    }
+    .pass { color: #4CAF50; }
+    .fail { color: #f44336; }
+  </style>
+</head>
+<body>
+  <h1>Polyline Mode Test</h1>
+  <div id="status">Running tests...</div>
+  <div id="results"></div>
+
+  <script type="module">
+    import initWasm from './wasm/rustroke.js';
+
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+
+    function logTest(name, passed, details = '') {
+      const div = document.createElement('div');
+      div.className = `test ${passed ? 'pass' : 'fail'}`;
+      div.textContent = `${passed ? '✓' : '✗'} ${name} ${details}`;
+      resultsEl.appendChild(div);
+      return passed;
+    }
+
+    async function runTests() {
+      try {
+        statusEl.textContent = 'Loading WASM...';
+        const wasm = await initWasm();
+        
+        statusEl.textContent = 'Initializing editor...';
+        wasm.editor_init();
+
+        let passed = 0;
+        let failed = 0;
+
+        // Test 1: Polyline start
+        statusEl.textContent = 'Test 1: Polyline start...';
+        wasm.editor_polyline_start(100, 100);
+        const len1 = wasm.editor_polyline_preview_len();
+        if (logTest('Polyline start', len1 === 2, `(preview has 2 coords)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Test 2: Polyline update (add point)
+        statusEl.textContent = 'Test 2: Polyline update...';
+        wasm.editor_polyline_update(200, 150);
+        const len2 = wasm.editor_polyline_preview_len();
+        if (logTest('Polyline update adds point', len2 === 4, `(preview has 4 coords)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Test 3: Polyline end
+        statusEl.textContent = 'Test 3: Polyline end...';
+        const segCount = wasm.editor_polyline_end(300, 200);
+        const lineCount = wasm.editor_line_count();
+        if (logTest('Polyline end creates segments', segCount >= 2 && lineCount === segCount, 
+                    `(${segCount} segments, ${lineCount} lines)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Test 4: Preview cleared after end
+        statusEl.textContent = 'Test 4: Preview cleared...';
+        const len3 = wasm.editor_polyline_preview_len();
+        if (logTest('Preview cleared after end', len3 === 0)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Test 5: Polyline with distance threshold
+        statusEl.textContent = 'Test 5: Distance threshold...';
+        wasm.editor_polyline_start(10, 10);
+        wasm.editor_polyline_update(11, 11); // Too close (< 8px)
+        const len4 = wasm.editor_polyline_preview_len();
+        if (logTest('Distance threshold prevents commit', len4 === 2, `(still only start point)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+        wasm.editor_polyline_end(10, 10); // Cancel
+
+        // Test 6: Undo polyline
+        statusEl.textContent = 'Test 6: Undo polyline...';
+        const beforeUndo = wasm.editor_line_count();
+        wasm.editor_undo();
+        const afterUndo = wasm.editor_line_count();
+        if (logTest('Undo removes entire polyline', afterUndo === 0, 
+                    `(${beforeUndo} -> ${afterUndo} lines)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Test 7: Multiple polylines
+        statusEl.textContent = 'Test 7: Multiple polylines...';
+        wasm.editor_polyline_start(50, 50);
+        wasm.editor_polyline_update(100, 50);
+        wasm.editor_polyline_update(150, 100);
+        const seg1 = wasm.editor_polyline_end(200, 150);
+        
+        wasm.editor_polyline_start(250, 50);
+        wasm.editor_polyline_update(300, 100);
+        const seg2 = wasm.editor_polyline_end(350, 150);
+        
+        const totalLines = wasm.editor_line_count();
+        if (logTest('Multiple polylines', totalLines === seg1 + seg2, 
+                    `(${seg1} + ${seg2} = ${totalLines} lines)`)) {
+          passed++;
+        } else {
+          failed++;
+        }
+
+        // Summary
+        statusEl.textContent = `Tests complete: ${passed} passed, ${failed} failed`;
+        statusEl.style.borderLeftColor = failed === 0 ? '#4CAF50' : '#f44336';
+
+        console.log('\n=== Polyline Mode Test Summary ===');
+        console.log(`Passed: ${passed}/${passed + failed}`);
+        console.log(`Failed: ${failed}/${passed + failed}`);
+        
+        if (failed === 0) {
+          console.log('✓ All tests passed!');
+        } else {
+          console.log('✗ Some tests failed');
+        }
+
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.style.borderLeftColor = '#f44336';
+        console.error('Test error:', err);
+      }
+    }
+
+    runTests();
+  </script>
+</body>
+</html>

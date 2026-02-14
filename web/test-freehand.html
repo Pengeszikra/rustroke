@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Freehand Continuous Drawing Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #2a2a2a;
+      color: #fff;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    #status {
+      margin: 20px 0;
+      padding: 10px;
+      background: #1a1a1a;
+      border-left: 4px solid #4CAF50;
+    }
+    .instruction {
+      margin: 10px 0;
+      padding: 10px;
+      background: #333;
+      border-radius: 4px;
+    }
+    svg {
+      background: #ABABAB;
+      border: 2px solid #666;
+      cursor: crosshair;
+    }
+    .info {
+      margin-top: 20px;
+      font-size: 14px;
+      color: #aaa;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Freehand Continuous Drawing Test</h1>
+    
+    <div class="instruction">
+      <strong>Instructions:</strong>
+      <ol>
+        <li>Click and hold on the canvas</li>
+        <li>Move your mouse around (draw a circle, zigzag, etc.)</li>
+        <li>Release the mouse button</li>
+        <li>You should see a smooth stroke made of many small line segments</li>
+      </ol>
+    </div>
+    
+    <div id="status">Ready to draw...</div>
+    
+    <svg id="canvas" width="800" height="600" viewBox="0 0 800 600">
+      <g id="lines"></g>
+      <line id="preview" stroke="white" stroke-width="1"></line>
+    </svg>
+    
+    <div class="info">
+      <strong>Expected behavior:</strong>
+      <ul>
+        <li>Every 30ms while drawing, a new line segment is created</li>
+        <li>Segments connect from previous position to current cursor position</li>
+        <li>Preview line shows in white from last drawn point to cursor</li>
+        <li>All segments appear as continuous stroke when released</li>
+      </ul>
+    </div>
+  </div>
+
+  <script type="module">
+    import initWasm from './wasm/rustroke.js';
+
+    const canvas = document.getElementById('canvas');
+    const linesGroup = document.getElementById('lines');
+    const preview = document.getElementById('preview');
+    const statusEl = document.getElementById('status');
+
+    let wasm = null;
+    let drawing = false;
+    let interval = null;
+    let lastPos = { x: 0, y: 0 };
+    let currentPos = { x: 0, y: 0 };
+    let segmentCount = 0;
+
+    async function init() {
+      try {
+        statusEl.textContent = 'Loading WASM...';
+        wasm = await initWasm();
+        wasm.editor_init();
+        statusEl.textContent = 'Ready to draw! Click and drag to create a continuous stroke.';
+        statusEl.style.borderLeftColor = '#4CAF50';
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.style.borderLeftColor = '#f44336';
+      }
+    }
+
+    function toSvgPoint(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const viewBox = canvas.viewBox.baseVal;
+      const scaleX = viewBox.width / rect.width;
+      const scaleY = viewBox.height / rect.height;
+      return {
+        x: (evt.clientX - rect.left) * scaleX + viewBox.x,
+        y: (evt.clientY - rect.top) * scaleY + viewBox.y
+      };
+    }
+
+    function renderLines() {
+      const len = wasm.editor_export_len_f32();
+      const ptr = wasm.editor_export_ptr_f32();
+      const coords = new Float32Array(wasm.memory.buffer, ptr, len);
+      
+      linesGroup.innerHTML = '';
+      for (let i = 0; i < len; i += 4) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', coords[i]);
+        line.setAttribute('y1', coords[i + 1]);
+        line.setAttribute('x2', coords[i + 2]);
+        line.setAttribute('y2', coords[i + 3]);
+        line.setAttribute('stroke', '#000000');
+        line.setAttribute('stroke-width', '1');
+        linesGroup.appendChild(line);
+      }
+    }
+
+    canvas.addEventListener('pointerdown', (evt) => {
+      if (!wasm) return;
+      evt.preventDefault();
+      canvas.setPointerCapture(evt.pointerId);
+      
+      const point = toSvgPoint(evt);
+      drawing = true;
+      segmentCount = 0;
+      lastPos = { x: point.x, y: point.y };
+      currentPos = { x: point.x, y: point.y };
+      
+      preview.setAttribute('x1', point.x);
+      preview.setAttribute('y1', point.y);
+      preview.setAttribute('x2', point.x);
+      preview.setAttribute('y2', point.y);
+      preview.classList.add('active');
+      
+      statusEl.textContent = 'Drawing... segments: 0';
+      
+      // Start 30ms sampling interval
+      interval = setInterval(() => {
+        if (!drawing || !wasm) return;
+        
+        const dx = currentPos.x - lastPos.x;
+        const dy = currentPos.y - lastPos.y;
+        
+        if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+          wasm.editor_add_line(lastPos.x, lastPos.y, currentPos.x, currentPos.y);
+          segmentCount++;
+          lastPos = { x: currentPos.x, y: currentPos.y };
+          renderLines();
+          statusEl.textContent = `Drawing... segments: ${segmentCount}`;
+        }
+      }, 30);
+    });
+
+    canvas.addEventListener('pointermove', (evt) => {
+      if (!drawing) return;
+      const pos = toSvgPoint(evt);
+      currentPos = { x: pos.x, y: pos.y };
+      
+      // Update preview
+      preview.setAttribute('x1', lastPos.x);
+      preview.setAttribute('y1', lastPos.y);
+      preview.setAttribute('x2', currentPos.x);
+      preview.setAttribute('y2', currentPos.y);
+    });
+
+    canvas.addEventListener('pointerup', (evt) => {
+      if (!drawing || !wasm) return;
+      drawing = false;
+      preview.classList.remove('active');
+      
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+      
+      const end = toSvgPoint(evt);
+      const dx = end.x - lastPos.x;
+      const dy = end.y - lastPos.y;
+      
+      if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+        wasm.editor_add_line(lastPos.x, lastPos.y, end.x, end.y);
+        segmentCount++;
+        renderLines();
+      }
+      
+      statusEl.textContent = `✓ Stroke complete! Total segments: ${segmentCount}, Total lines: ${wasm.editor_line_count()}`;
+      statusEl.style.borderLeftColor = '#4CAF50';
+      
+      console.log(`Freehand stroke: ${segmentCount} segments`);
+    });
+
+    init();
+  </script>
+</body>
+</html>

@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Freehand Persistence Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      padding: 20px;
+      background: #2a2a2a;
+      color: #fff;
+    }
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+    #status {
+      margin: 20px 0;
+      padding: 10px;
+      background: #1a1a1a;
+      border-left: 4px solid #4CAF50;
+      font-size: 16px;
+    }
+    .instruction {
+      margin: 10px 0;
+      padding: 15px;
+      background: #333;
+      border-radius: 4px;
+    }
+    .instruction strong {
+      color: #4CAF50;
+    }
+    svg {
+      background: #ABABAB;
+      border: 2px solid #666;
+      cursor: crosshair;
+    }
+    .test-area {
+      margin-top: 30px;
+      padding: 20px;
+      background: #1a1a1a;
+      border: 2px dashed #666;
+    }
+    .pass { color: #4CAF50; }
+    .fail { color: #f44336; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Freehand Persistence Test</h1>
+    
+    <div class="instruction">
+      <strong>Test Objective:</strong> Verify freehand drawing continues even when cursor leaves canvas during drag.
+      <br><br>
+      <strong>How to Test:</strong>
+      <ol>
+        <li>Click and hold inside the gray canvas area</li>
+        <li>While holding the mouse button, move cursor OUTSIDE the canvas</li>
+        <li>Move around outside the canvas border</li>
+        <li>Move back inside the canvas</li>
+        <li>Release the mouse button</li>
+      </ol>
+      <strong>Expected Result:</strong> Drawing should continue the entire time, creating a continuous stroke even when cursor was outside canvas.
+    </div>
+    
+    <div id="status">Ready to test. Click and drag, then move outside canvas while holding button...</div>
+    
+    <svg id="canvas" width="800" height="600" viewBox="0 0 800 600">
+      <g id="lines"></g>
+      <line id="preview" stroke="white" stroke-width="1"></line>
+    </svg>
+    
+    <div class="test-area">
+      <h3>Test Results:</h3>
+      <div id="results">
+        <p>Waiting for test...</p>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import initWasm from './wasm/rustroke.js';
+
+    const canvas = document.getElementById('canvas');
+    const linesGroup = document.getElementById('lines');
+    const preview = document.getElementById('preview');
+    const statusEl = document.getElementById('status');
+    const resultsEl = document.getElementById('results');
+
+    let wasm = null;
+    let drawing = false;
+    let interval = null;
+    let lastPos = { x: 0, y: 0 };
+    let currentPos = { x: 0, y: 0 };
+    let segmentCount = 0;
+    let leftCanvasCount = 0;
+    let enteredCanvasCount = 0;
+    let segmentsWhileOutside = 0;
+    let wasOutside = false;
+
+    async function init() {
+      try {
+        statusEl.textContent = 'Loading WASM...';
+        wasm = await initWasm();
+        wasm.editor_init();
+        statusEl.textContent = 'Ready to test! Click and drag, then move outside canvas while holding button...';
+        statusEl.style.borderLeftColor = '#4CAF50';
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+        statusEl.style.borderLeftColor = '#f44336';
+      }
+    }
+
+    function toSvgPoint(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const viewBox = canvas.viewBox.baseVal;
+      const scaleX = viewBox.width / rect.width;
+      const scaleY = viewBox.height / rect.height;
+      return {
+        x: (evt.clientX - rect.left) * scaleX + viewBox.x,
+        y: (evt.clientY - rect.top) * scaleY + viewBox.y
+      };
+    }
+
+    function renderLines() {
+      const len = wasm.editor_export_len_f32();
+      const ptr = wasm.editor_export_ptr_f32();
+      const coords = new Float32Array(wasm.memory.buffer, ptr, len);
+      
+      linesGroup.innerHTML = '';
+      for (let i = 0; i < len; i += 4) {
+        const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        line.setAttribute('x1', coords[i]);
+        line.setAttribute('y1', coords[i + 1]);
+        line.setAttribute('x2', coords[i + 2]);
+        line.setAttribute('y2', coords[i + 3]);
+        line.setAttribute('stroke', '#000000');
+        line.setAttribute('stroke-width', '1');
+        linesGroup.appendChild(line);
+      }
+    }
+
+    canvas.addEventListener('pointerdown', (evt) => {
+      if (!wasm) return;
+      evt.preventDefault();
+      canvas.setPointerCapture(evt.pointerId);
+      
+      const point = toSvgPoint(evt);
+      drawing = true;
+      segmentCount = 0;
+      leftCanvasCount = 0;
+      enteredCanvasCount = 0;
+      segmentsWhileOutside = 0;
+      wasOutside = false;
+      lastPos = { x: point.x, y: point.y };
+      currentPos = { x: point.x, y: point.y };
+      
+      preview.setAttribute('x1', point.x);
+      preview.setAttribute('y1', point.y);
+      preview.setAttribute('x2', point.x);
+      preview.setAttribute('y2', point.y);
+      preview.classList.add('active');
+      
+      statusEl.textContent = '🎨 Drawing... Move cursor outside canvas while holding button!';
+      statusEl.style.borderLeftColor = '#2196F3';
+      
+      // Start 30ms sampling interval
+      interval = setInterval(() => {
+        if (!drawing || !wasm) return;
+        
+        const dx = currentPos.x - lastPos.x;
+        const dy = currentPos.y - lastPos.y;
+        
+        if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+          wasm.editor_add_line(lastPos.x, lastPos.y, currentPos.x, currentPos.y);
+          segmentCount++;
+          if (wasOutside) {
+            segmentsWhileOutside++;
+          }
+          lastPos = { x: currentPos.x, y: currentPos.y };
+          renderLines();
+          
+          const outsideInfo = wasOutside ? ' (OUTSIDE CANVAS)' : '';
+          statusEl.textContent = `🎨 Drawing... segments: ${segmentCount}${outsideInfo}`;
+        }
+      }, 30);
+    });
+
+    canvas.addEventListener('pointermove', (evt) => {
+      if (!drawing) return;
+      const pos = toSvgPoint(evt);
+      currentPos = { x: pos.x, y: pos.y };
+      
+      // Update preview
+      preview.setAttribute('x1', lastPos.x);
+      preview.setAttribute('y1', lastPos.y);
+      preview.setAttribute('x2', currentPos.x);
+      preview.setAttribute('y2', currentPos.y);
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+      if (drawing) {
+        leftCanvasCount++;
+        wasOutside = true;
+        statusEl.textContent = `🎨 Drawing OUTSIDE canvas... (left ${leftCanvasCount} times, ${segmentCount} segments so far)`;
+        statusEl.style.borderLeftColor = '#FF9800';
+      }
+    });
+
+    canvas.addEventListener('pointerenter', () => {
+      if (drawing) {
+        enteredCanvasCount++;
+        wasOutside = false;
+        statusEl.textContent = `🎨 Drawing back INSIDE canvas... (segments: ${segmentCount})`;
+        statusEl.style.borderLeftColor = '#2196F3';
+      }
+    });
+
+    canvas.addEventListener('pointerup', (evt) => {
+      if (!drawing || !wasm) return;
+      drawing = false;
+      preview.classList.remove('active');
+      
+      if (interval) {
+        clearInterval(interval);
+        interval = null;
+      }
+      
+      const end = toSvgPoint(evt);
+      const dx = end.x - lastPos.x;
+      const dy = end.y - lastPos.y;
+      
+      if (Math.abs(dx) > 0.1 || Math.abs(dy) > 0.1) {
+        wasm.editor_add_line(lastPos.x, lastPos.y, end.x, end.y);
+        segmentCount++;
+        renderLines();
+      }
+      
+      // Show results
+      const testPassed = leftCanvasCount > 0 && segmentsWhileOutside > 0;
+      resultsEl.innerHTML = `
+        <p class="${testPassed ? 'pass' : 'fail'}">
+          <strong>${testPassed ? '✓ TEST PASSED' : '✗ TEST FAILED'}</strong>
+        </p>
+        <ul>
+          <li>Total segments created: <strong>${segmentCount}</strong></li>
+          <li>Times cursor left canvas: <strong>${leftCanvasCount}</strong></li>
+          <li>Times cursor re-entered canvas: <strong>${enteredCanvasCount}</strong></li>
+          <li>Segments created while outside: <strong class="${segmentsWhileOutside > 0 ? 'pass' : 'fail'}">${segmentsWhileOutside}</strong></li>
+        </ul>
+        ${testPassed 
+          ? '<p class="pass">✓ Drawing continued even when cursor was outside canvas!</p>' 
+          : '<p class="fail">✗ Drawing may have stopped when cursor left canvas.</p>'}
+        <p><em>Try again: Click "Clear" and repeat the test.</em></p>
+      `;
+      
+      statusEl.textContent = testPassed 
+        ? `✓ Test complete! Drawing persisted outside canvas (${segmentsWhileOutside} segments created while outside).`
+        : `Test complete. ${leftCanvasCount === 0 ? 'You need to move cursor outside canvas during drag.' : 'Check results below.'}`;
+      statusEl.style.borderLeftColor = testPassed ? '#4CAF50' : '#f44336';
+      
+      console.log('Test Results:', {
+        totalSegments: segmentCount,
+        leftCanvas: leftCanvasCount,
+        enteredCanvas: enteredCanvasCount,
+        segmentsWhileOutside,
+        testPassed
+      });
+    });
+
+    // Add clear button
+    const clearBtn = document.createElement('button');
+    clearBtn.textContent = 'Clear';
+    clearBtn.style.cssText = 'margin-top: 10px; padding: 10px 20px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;';
+    clearBtn.onclick = () => {
+      if (wasm) {
+        wasm.editor_clear();
+        renderLines();
+        resultsEl.innerHTML = '<p>Waiting for test...</p>';
+        statusEl.textContent = 'Ready to test! Click and drag, then move outside canvas while holding button...';
+        statusEl.style.borderLeftColor = '#4CAF50';
+      }
+    };
+    document.querySelector('.test-area').appendChild(clearBtn);
+
+    init();
+  </script>
+</body>
+</html>

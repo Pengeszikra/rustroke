@@ -4,6 +4,12 @@
 
 import initWasm from './wasm/rustroke.js';
 
+// Disable console logging (keep errors)
+const originalLog = console.log;
+const originalWarn = console.warn;
+console.log = () => {};
+console.warn = () => {};
+
 // Wait for DOM and initialize
 async function main() {
   console.log('[Rustroke] Initializing...');
@@ -21,12 +27,6 @@ async function main() {
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
-    const recordBtn = document.getElementById('recordBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const playBtn = document.getElementById('playBtn');
-    const clearRecordBtn = document.getElementById('clearRecordBtn');
-    const exportBtn = document.getElementById('exportBtn');
-    const importBtn = document.getElementById('importBtn');
     const statusEl = document.getElementById('status');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
@@ -1243,47 +1243,6 @@ async function main() {
       console.log('[Frame] Added frame at viewBox boundaries', worldCorners);
     });
 
-    // Recording controls
-    recordBtn.addEventListener('click', () => {
-      if (!isRecording && !isPlaying) {
-        startRecording();
-      }
-    });
-
-    stopBtn.addEventListener('click', () => {
-      if (isRecording) {
-        stopRecording();
-      } else if (isPlaying) {
-        stopPlayback();
-      }
-    });
-
-    playBtn.addEventListener('click', () => {
-      if (!isRecording && !isPlaying && events.length > 0) {
-        playRecording();
-      }
-    });
-
-    clearRecordBtn.addEventListener('click', () => {
-      if (!isRecording && !isPlaying) {
-        if (confirm('Clear recording?')) {
-          clearRecording();
-        }
-      }
-    });
-
-    exportBtn.addEventListener('click', () => {
-      if (!isRecording && !isPlaying && events.length > 0) {
-        exportRecording();
-      }
-    });
-
-    importBtn.addEventListener('click', () => {
-      if (!isRecording && !isPlaying) {
-        importRecording();
-      }
-    });
-
     // Escape key handler - turn off fill, debug, and graph modes
     document.addEventListener('keydown', (evt) => {
       if (evt.key === 'Escape') {
@@ -1328,9 +1287,6 @@ async function main() {
   wasm.editor_set_fill_color(colorPtr, colorBytes.length);
   
   renderFromWasm();
-  
-  // Initialize recording UI
-  updateRecordingUI();
   
   console.log('[Rustroke] Ready!');
 
