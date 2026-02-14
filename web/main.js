@@ -27,7 +27,14 @@ async function main() {
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
-    const statusEl = document.getElementById('status');
+    const debugBadge = document.getElementById('debugBadge');
+    const lineCounter = document.getElementById('lineCounter');
+    const fillMetrics = document.getElementById('fillMetrics');
+    const metricSteps = document.getElementById('metricSteps');
+    const metricStates = document.getElementById('metricStates');
+    const metricMs = document.getElementById('metricMs');
+    const metricCandMax = document.getElementById('metricCandMax');
+    const metricAbort = document.getElementById('metricAbort');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
     const debugNearestPoint = document.getElementById('debugNearestPoint');
@@ -44,6 +51,7 @@ async function main() {
     let debugMode = false;
     let graphDebugMode = false;
     let showLines = true;
+    let isFilling = false; // GUARDRAIL: Re-entrancy lock
     
     // Recording/Playback state
     let isRecording = false;
@@ -141,8 +149,9 @@ async function main() {
           
           renderFromWasm();
           
-          // Render debug visuals only if debug mode is on
+          // Update fill metrics if debug mode is on
           if (debugMode) {
+            updateFillMetrics();
             renderFillTrace();
             renderFillDebug();
           }
@@ -204,12 +213,59 @@ async function main() {
             debugLayer.style.display = 'none';
             fillTraceLayer.replaceChildren();
             fillDebugLayer.replaceChildren();
+            // Metrics and badge are now STATIC (always visible)
           } else {
             debugLayer.style.display = 'block';
             updateDebugIntersections();
           }
           break;
         }
+      }
+    }
+
+    /**
+     * Update fill metrics display from WASM stats
+     */
+    function updateFillMetrics() {
+      if (!wasm) return;
+      
+      // Try to read fill stats if available
+      if (typeof wasm.editor_fill_stats_ptr_f32 === 'function' && 
+          typeof wasm.editor_fill_stats_len_f32 === 'function') {
+        const len = wasm.editor_fill_stats_len_f32();
+        const ptr = wasm.editor_fill_stats_ptr_f32();
+        
+        if (len >= 5 && ptr) {
+          const stats = new Float32Array(wasm.memory.buffer, ptr, 5);
+          const ok = stats[0];
+          const steps = Math.round(stats[1]);
+          const uniqueStates = Math.round(stats[2]);
+          const candMax = Math.round(stats[3]);
+          const abortCode = Math.round(stats[4]);
+          
+          metricSteps.textContent = steps;
+          metricStates.textContent = uniqueStates;
+          metricMs.textContent = '~' + Math.round(steps / 100); // Estimate: ~100 steps/ms
+          metricCandMax.textContent = candMax;
+          
+          const abortReasons = ['NONE', 'MAX_STEPS', 'REPEAT_STATE', 'NO_PROGRESS', 'DEAD_END', 'TIME_BUDGET'];
+          metricAbort.textContent = abortReasons[abortCode] || 'UNKNOWN';
+          metricAbort.style.color = (ok === 1.0) ? '#4ade80' : '#f87171';
+        } else {
+          // No stats available - show placeholder
+          metricSteps.textContent = '?';
+          metricStates.textContent = '?';
+          metricMs.textContent = '?';
+          metricCandMax.textContent = '?';
+          metricAbort.textContent = 'N/A';
+        }
+      } else {
+        // Stats exports not available - show placeholder
+        metricSteps.textContent = 'n/a';
+        metricStates.textContent = 'n/a';
+        metricMs.textContent = 'n/a';
+        metricCandMax.textContent = 'n/a';
+        metricAbort.textContent = 'n/a';
       }
     }
 
@@ -463,7 +519,7 @@ async function main() {
       if (showLines) {
         if (!ptr || len === 0) {
           linesGroup.replaceChildren();
-          statusEl.textContent = 'Lines: 0';
+          lineCounter.textContent = 'Lines: 0';
         } else {
           const arr = new Float32Array(wasm.memory.buffer, ptr, len);
           const fragments = [];
@@ -476,15 +532,15 @@ async function main() {
             fragments.push(line);
           }
           linesGroup.replaceChildren(...fragments);
-          statusEl.textContent = `Lines: ${wasm.editor_line_count()}`;
+          lineCounter.textContent = `Lines: ${wasm.editor_line_count()}`;
         }
       } else {
         // Hide lines but still update status
         linesGroup.replaceChildren();
         if (ptr && len > 0) {
-          statusEl.textContent = `Lines: ${wasm.editor_line_count()} (hidden)`;
+          lineCounter.textContent = `Lines: ${wasm.editor_line_count()} (hidden)`;
         } else {
-          statusEl.textContent = 'Lines: 0';
+          lineCounter.textContent = 'Lines: 0';
         }
       }
 
@@ -1285,6 +1341,22 @@ async function main() {
   const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
   colorView.set(colorBytes);
   wasm.editor_set_fill_color(colorPtr, colorBytes.length);
+  
+  // Update viewBox to match viewport size for accurate coordinate mapping
+  function updateViewBox() {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    canvas.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    // Update the cached viewBox reference
+    const vb = canvas.viewBox.baseVal;
+    viewBox.x = vb.x;
+    viewBox.y = vb.y;
+    viewBox.width = vb.width;
+    viewBox.height = vb.height;
+  }
+  
+  updateViewBox();
+  window.addEventListener('resize', updateViewBox);
   
   renderFromWasm();
   

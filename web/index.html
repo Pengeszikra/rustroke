@@ -17,37 +17,93 @@
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       margin: 0;
-      padding: 20px;
-      background: var(--paper);
+      padding: 0;
+      background: var(--canvas-bg);
       color: #ffffff;
+      overflow: hidden;
+      width: 100vw;
+      height: 100vh;
     }
-    .container {
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    header {
+    
+    /* Floating toolbar */
+    #toolbar {
+      position: fixed;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      z-index: 999;
+      background: rgba(66, 66, 66, 0.95);
+      backdrop-filter: blur(8px);
+      border-radius: 8px;
+      padding: 12px 16px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
       display: flex;
-      justify-content: space-between;
+      flex-direction: column;
+      gap: 8px;
+    }
+    
+    /* Top row: title + status */
+    .toolbar-top {
+      display: flex;
       align-items: center;
-      margin-bottom: 20px;
-      gap: 10px;
+      gap: 16px;
       flex-wrap: wrap;
     }
+    
     h1 { 
       margin: 0; 
-      font-size: 24px;
+      font-size: 20px;
       color: var(--accent);
       text-transform: lowercase;
       user-select: none;
+      font-weight: 600;
     }
+    
+    #status {
+      font-size: 12px;
+      color: #ABABAB;
+      margin: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    .debug-badge {
+      display: inline-block;
+      background: #ef4444;
+      color: white;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    
+    #fillMetrics {
+      display: inline-block;
+      font-family: monospace;
+      font-size: 11px;
+      color: #999;
+      margin: 0;
+    }
+    
+    /* Bottom row: buttons */
+    .toolbar-buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    
     button {
       background: var(--accent);
       color: #424242;
       border: none;
-      padding: 8px 16px;
+      padding: 7px 14px;
       border-radius: 4px;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 500;
       transition: background 0.2s;
       user-select: none;
@@ -58,20 +114,25 @@
       color: white;
     }
     input[type="color"] {
-      width: 40px;
-      height: 40px;
+      width: 36px;
+      height: 36px;
       border: none;
       border-radius: 4px;
       cursor: pointer;
     }
+    
+    /* Fullscreen canvas */
     svg {
-      border: 1px solid #333;
-      background: var(--canvas-bg);
-      border-radius: 4px;
+      width: 100vw;
+      height: 100vh;
       display: block;
-      margin-bottom: 20px;
+      background: var(--canvas-bg);
       touch-action: none;
+      position: fixed;
+      top: 0;
+      left: 0;
     }
+    
     #lines line {
       stroke: var(--ink);
       stroke-width: 1;
@@ -136,52 +197,57 @@
       stroke-width: 3;
       fill: none;
     }
-    #status {
-      font-size: 12px;
-      color: #ABABAB;
-      margin-top: 10px;
-    }
   </style>
 </head>
 <body>
-  <div class="container">
-    <header>
+  <!-- Floating Toolbar -->
+  <div id="toolbar">
+    <!-- Top row: title + status + metrics -->
+    <div class="toolbar-top">
       <h1>rustroke</h1>
-      <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-        <button id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
-        <button id="clearBtn" title="Clear">Clear</button>
-        <button id="cleanBtn" title="Remove dangling line segments">Trim</button>
-        <button id="fillBtn" title="Fill Region">Fill</button>
-        <input id="fillColor" type="color" value="#747474" title="Fill color">
-        <button id="addFrameBtn" title="Add rectangular frame border">Frame</button>
-        <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
-        <button id="graphDebugBtn" title="Toggle Graph Debug">Graph</button>
-        <button id="toggleLinesBtn" title="Toggle Lines Visibility">Hide</button>
+      <span class="debug-badge" id="debugBadge">DEBUG</span>
+      <div id="status">
+        <span id="lineCounter">Lines: 0</span>
+        <span id="fillMetrics">
+          fill: steps=<span id="metricSteps">0</span> states=<span id="metricStates">0</span> ms=<span id="metricMs">0</span> candMax=<span id="metricCandMax">0</span> abort=<span id="metricAbort">NONE</span>
+        </span>
       </div>
-    </header>
-
-    <svg id="canvas" viewBox="0 0 800 600" preserveAspectRatio="xMidYMid meet">
-      <defs>
-        <style>
-          text { font-size: 12px; fill: #999; }
-        </style>
-      </defs>
-      <g id="fills"></g>
-      <g id="lines"></g>
-      <g id="graphDebugLayer" pointer-events="none"></g>
-      <line id="preview"></line>
-      <g id="debugLayer">
-        <line id="debugNearestLine"></line>
-        <circle id="debugNearestPoint"></circle>
-        <line id="debugRay"></line>
-        <g id="debugIntersections"></g>
-        <g id="fillTraceLayer" pointer-events="none"></g>
-        <g id="fillDebugLayer"></g>
-      </g>
-    </svg>
-
-    <div id="status">Lines: 0</div>
+    </div>
+    
+    <!-- Bottom row: buttons -->
+    <div class="toolbar-buttons">
+      <button id="undoBtn" title="Undo (Ctrl+Z)">Undo</button>
+      <button id="clearBtn" title="Clear">Clear</button>
+      <button id="cleanBtn" title="Remove dangling line segments">Trim</button>
+      <button id="fillBtn" title="Fill Region">Fill</button>
+      <input id="fillColor" type="color" value="#747474" title="Fill color">
+      <button id="addFrameBtn" title="Add rectangular frame border">Frame</button>
+      <button id="debugBtn" title="Toggle Debug Mode">Debug</button>
+      <button id="graphDebugBtn" title="Toggle Graph Debug">Graph</button>
+      <button id="toggleLinesBtn" title="Toggle Lines Visibility">Hide</button>
+    </div>
   </div>
+
+  <!-- Fullscreen Canvas -->
+  <svg id="canvas" viewBox="0 0 800 600" preserveAspectRatio="none">
+    <defs>
+      <style>
+        text { font-size: 12px; fill: #999; }
+      </style>
+    </defs>
+    <g id="fills"></g>
+    <g id="lines"></g>
+    <g id="graphDebugLayer" pointer-events="none"></g>
+    <line id="preview"></line>
+    <g id="debugLayer">
+      <line id="debugNearestLine"></line>
+      <circle id="debugNearestPoint"></circle>
+      <line id="debugRay"></line>
+      <g id="debugIntersections"></g>
+      <g id="fillTraceLayer" pointer-events="none"></g>
+      <g id="fillDebugLayer"></g>
+    </g>
+  </svg>
 
   <script type="module" src="./main.js"></script>
 </body>

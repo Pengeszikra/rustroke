@@ -208,6 +208,39 @@ struct FillGraph {
     node_sectors: Vec<Vec<u32>>, // node -> list of segment indices (undirected)
 }
 
+// GUARDRAILS: Fill algorithm safety limits
+const MAX_FILL_STEPS: u32 = 20000;
+const TRACE_RING_SIZE: usize = 256;
+const NO_PROGRESS_WINDOW: usize = 20;
+const NO_PROGRESS_THRESHOLD: usize = 3;
+
+// State key for loop detection: (node_id, incoming_edge_id)
+#[derive(Clone, Copy, PartialEq)]
+struct StateKey {
+    node: u32,
+    incoming: u32, // edge identifier (segment ID or special marker)
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+struct TraceEntry {
+    step: u32,
+    node: u32,
+    incoming: u32,
+    chosen: u32,
+    cand_count: u32,
+    score: f32, // abs_turn or similar
+}
+
+#[allow(dead_code)]
+struct FillRunStats {
+    steps: u32,
+    unique_states: u32,
+    cand_max: u32,
+    abort_reason: &'static str,
+    trace: Vec<TraceEntry>,
+}
+
 #[derive(Clone)]
 struct Polygon {
     points: Vec<(f32, f32)>,
@@ -471,6 +504,7 @@ struct Editor {
     fill_walk_debug_buf: Vec<f32>,  // Walk step debugging
     fill_color: u32,                // Current fill color (RGBA)
     graph_store: GraphStore,        // Incremental closed-component tracker
+    last_fill_stats: Vec<f32>,      // [ok, steps, unique_states, cand_max, abort_code] + trace ring
 }
 
 // Compute a simple angle proxy for sorting (0-4 range for quadrants)
@@ -770,6 +804,7 @@ impl Editor {
             fill_walk_debug_buf: Vec::new(),
             fill_color: 0x747474FF,
             graph_store: GraphStore::new(),
+            last_fill_stats: Vec::new(),
         }
     }
 
@@ -1203,6 +1238,11 @@ impl Editor {
         let mut visited_edges: Vec<EdgeKey> = Vec::new();
         let mut step_debug: Vec<StepDebug> = Vec::new();
 
+        // GUARDRAILS: State tracking and loop detection
+        let mut visited_states: Vec<StateKey> = Vec::new();
+        let mut trace_ring: Vec<TraceEntry> = Vec::new();
+        let mut cand_max: u32 = 0;
+
         if (start_from as usize) >= self.fill_graph.nodes.len()
             || (start_to as usize) >= self.fill_graph.nodes.len()
         {
@@ -1223,16 +1263,39 @@ impl Editor {
         };
         visited_edges.push(start_edge);
 
-        let max_steps = core::cmp::max(
-            8,
-            (self.fill_graph.segments.len() as u32) * 3 + 20,
-        );
         let mut step_idx = 0u32;
         let gap_r2 = gap_radius * gap_radius;
 
         loop {
-            if step_idx >= max_steps {
+            // GUARDRAIL 1: Hard step limit
+            if step_idx >= MAX_FILL_STEPS {
                 return TraceResult::fail(FailReason::StepLimit, step_idx, step_debug);
+            }
+
+            // GUARDRAIL 2: NO_PROGRESS detector - check if we're cycling in a small state set
+            if step_idx >= NO_PROGRESS_WINDOW as u32 {
+                let recent_start = visited_states.len().saturating_sub(NO_PROGRESS_WINDOW);
+                let recent_states = &visited_states[recent_start..];
+                
+                // Count unique states in recent window
+                let mut unique_recent: Vec<StateKey> = Vec::new();
+                for &state in recent_states {
+                    let mut found = false;
+                    for &u in unique_recent.iter() {
+                        if u == state {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        unique_recent.push(state);
+                    }
+                }
+                
+                // If recent window only has <=3 unique states, we're stuck
+                if unique_recent.len() <= NO_PROGRESS_THRESHOLD {
+                    return TraceResult::fail(FailReason::DeadEnd, step_idx, step_debug);
+                }
             }
 
             let cur_pt = self.fill_graph.nodes[cur_node as usize];
@@ -1441,6 +1504,42 @@ impl Editor {
                 vin: (vinx, viny),
                 candidates: step_cands,
             });
+
+            // GUARDRAILS: Track candidate count and state
+            let cand_count = usable.len() as u32;
+            if cand_count > cand_max {
+                cand_max = cand_count;
+            }
+
+            // Create state key for loop detection: (node, incoming_segment_id)
+            let incoming_seg_id = selected_key.seg.unwrap_or(u32::MAX);
+            let state_key = StateKey {
+                node: chosen.next,
+                incoming: incoming_seg_id,
+            };
+
+            // GUARDRAIL 3: REPEAT_STATE detection
+            for &prev_state in visited_states.iter() {
+                if prev_state == state_key {
+                    // We've been in this exact state before - abort
+                    return TraceResult::fail(FailReason::PrematureCycle, step_idx, step_debug);
+                }
+            }
+            visited_states.push(state_key);
+
+            // GUARDRAILS: Add to ring buffer trace (keep last N entries)
+            let trace_entry = TraceEntry {
+                step: step_idx,
+                node: cur_node,
+                incoming: incoming_seg_id,
+                chosen: chosen.next,
+                cand_count,
+                score: chosen.abs_turn,
+            };
+            if trace_ring.len() >= TRACE_RING_SIZE {
+                trace_ring.remove(0);
+            }
+            trace_ring.push(trace_entry);
 
             let next_pt = self.fill_graph.nodes[chosen.next as usize];
             boundary_points.push((next_pt.x, next_pt.y));
@@ -2533,4 +2632,24 @@ pub extern "C" fn editor_fill_walk_debug_ptr_f32() -> *const f32 {
 #[no_mangle]
 pub extern "C" fn editor_fill_walk_debug_len_f32() -> u32 {
     editor_ref().map(|e| e.fill_walk_debug_len()).unwrap_or(0)
+}
+
+// GUARDRAILS: Fill stats exports
+// Format: [ok, steps, unique_states, cand_max, abort_code]
+#[no_mangle]
+pub extern "C" fn editor_fill_stats_ptr_f32() -> *const f32 {
+    editor_ref()
+        .map(|e| {
+            if e.last_fill_stats.is_empty() {
+                ptr::null()
+            } else {
+                e.last_fill_stats.as_ptr()
+            }
+        })
+        .unwrap_or(ptr::null())
+}
+
+#[no_mangle]
+pub extern "C" fn editor_fill_stats_len_f32() -> u32 {
+    editor_ref().map(|e| e.last_fill_stats.len() as u32).unwrap_or(0)
 }
