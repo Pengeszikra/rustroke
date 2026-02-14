@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node web/diagnostic.cjs",
+    "test:browser": "vite --open /self-test.html"
   },
   "devDependencies": {
     "vite": "^5.0.0"

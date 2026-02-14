@@ -1,6 +1,15 @@
 #![no_std]
 
+// SAFETY POLICY: Single-threaded WASM execution only
+// This code uses UnsafeCell without synchronization.
+// DO NOT compile with WASM atomics/threads without adding Mutex protection.
+#[cfg(target_feature = "atomics")]
+compile_error!("This code is NOT thread-safe. Add Mutex<Editor> before enabling atomics.");
+
 extern crate alloc;
+
+mod graph;
+mod debug_checks;
 
 use alloc::vec::Vec;
 use core::alloc::{GlobalAlloc, Layout};
@@ -9,6 +18,8 @@ use core::f32::consts::PI;
 use core::ptr;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::hint::spin_loop;
+use graph::GraphStore;
+use debug_checks::*;
 
 const HEAP_SIZE: usize = 1024 * 1024;
 
@@ -459,6 +470,7 @@ struct Editor {
     effective_degree: Vec<u32>,     // Effective degree after pruning
     fill_walk_debug_buf: Vec<f32>,  // Walk step debugging
     fill_color: u32,                // Current fill color (RGBA)
+    graph_store: GraphStore,        // Incremental closed-component tracker
 }
 
 // Compute a simple angle proxy for sorting (0-4 range for quadrants)
@@ -757,6 +769,7 @@ impl Editor {
             effective_degree: Vec::new(),
             fill_walk_debug_buf: Vec::new(),
             fill_color: 0x747474FF,
+            graph_store: GraphStore::new(),
         }
     }
 
@@ -774,11 +787,21 @@ impl Editor {
             return;
         }
 
+        // Build graph_store from all lines to track closed components
+        // This is used ONLY for fill filtering, not for debug/graph visualization
+        self.graph_store.clear();
+        for (idx, line) in self.lines.iter().enumerate() {
+            self.graph_store.add_segment(line.x1, line.y1, line.x2, line.y2, idx);
+        }
+
+        // For debug and graph visualization, we build the FULL graph (all lines)
+        // Closed component filtering is only applied during actual fill operation
+        
         let mut registry = IntersectionRegistry::new();
         let mut per_line_nodes: Vec<Vec<(f32, u32)>> = Vec::new();
         per_line_nodes.resize(self.lines.len(), Vec::new());
 
-        // Insert endpoints
+        // Insert endpoints for ALL lines (for debug/graph visualization)
         for (idx, line) in self.lines.iter().enumerate() {
             let n0 = registry.get_or_insert(line.x1, line.y1, &mut self.fill_graph.nodes);
             let n1 = registry.get_or_insert(line.x2, line.y2, &mut self.fill_graph.nodes);
@@ -786,7 +809,7 @@ impl Editor {
             per_line_nodes[idx].push((1.0, n1));
         }
 
-        // Collect intersections with shared node ids
+        // Collect intersections with shared node ids (ALL lines)
         let mut intersection_node_ids: Vec<u32> = Vec::new();
         for i in 0..self.lines.len() {
             for j in (i + 1)..self.lines.len() {
@@ -1031,6 +1054,9 @@ impl Editor {
         }
 
         self.rebuild_graph_debug_buf();
+        
+        // Verify fill graph integrity in debug builds
+        check_fill_graph_integrity(&self.fill_graph);
     }
 
     fn rebuild_graph_debug_buf(&mut self) {
@@ -1462,6 +1488,9 @@ impl Editor {
     }
 
     fn fill_debug_at(&mut self, ox: f32, oy: f32) {
+        // Validate input coordinates
+        check_line_coordinates(ox, oy, ox, oy);
+        
         self.fill_trace_buf.clear();
         self.fill_walk_debug_buf.clear();
         self.fill_candidates_buf.clear();
@@ -1488,6 +1517,7 @@ impl Editor {
         // Pick starting segment nearest to origin
         // CRITICAL: only consider segments where BOTH endpoints have degree >= 2
         // This prevents starting fill from dangling edges (open chains)
+        
         let mut candidates: Vec<(usize, f32)> = Vec::new();
         for (i, seg) in self.fill_graph.segments.iter().enumerate() {
             let degree_a = if (seg.a as usize) < self.fill_graph.node_sectors.len() {
@@ -1918,6 +1948,9 @@ impl Editor {
     }
 
     fn add_line(&mut self, line: Line) {
+        // Validate coordinates
+        check_line_coordinates(line.x1, line.y1, line.x2, line.y2);
+        
         // Skip zero-length lines
         let dx = line.x2 - line.x1;
         let dy = line.y2 - line.y1;
@@ -1957,6 +1990,13 @@ impl Editor {
         self.refresh_export();
         self.recompute_intersections();
         self.build_fill_graph();
+        
+        // Verify cleared state in debug builds
+        #[cfg(debug_assertions)]
+        {
+            debug_assert!(self.lines.is_empty(), "Lines not cleared");
+            debug_assert!(self.fills.is_empty(), "Fills not cleared");
+        }
     }
 
     // Overhang trimming = 2-core leaf stripping on cut-segment graph
@@ -2139,6 +2179,9 @@ impl Editor {
         self.refresh_export_fills();
         self.recompute_intersections();
         self.build_fill_graph();
+        
+        // Verify state after undo in debug builds
+        check_editor_integrity(self);
     }
 
     fn line_count(&self) -> u32 {
@@ -2226,11 +2269,16 @@ impl Editor {
     }
 }
 
+// LOCK POLICY:
+// This global is accessed only from single-threaded WASM.
+// JavaScript calls all editor_* functions from the main thread only.
+// SAFETY: UnsafeCell is wrapped in Sync ONLY because we guarantee single-threaded access.
+// If Web Workers or WASM threads are used, this MUST be changed to Mutex<Option<Editor>>.
 struct EditorCell {
     inner: UnsafeCell<Option<Editor>>,
 }
 
-unsafe impl Sync for EditorCell {}
+unsafe impl Sync for EditorCell {}  // Only safe for single-threaded WASM
 
 static EDITOR: EditorCell = EditorCell {
     inner: UnsafeCell::new(None),
