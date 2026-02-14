@@ -24,6 +24,7 @@ async function main() {
     const fillBtn = document.getElementById('fillBtn');
     const fillColor = document.getElementById('fillColor');
     const addFrameBtn = document.getElementById('addFrameBtn');
+    const exportPngBtn = document.getElementById('exportPngBtn');
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
@@ -266,6 +267,133 @@ async function main() {
         metricMs.textContent = 'n/a';
         metricCandMax.textContent = 'n/a';
         metricAbort.textContent = 'n/a';
+      }
+    }
+
+    /**
+     * Export current canvas view as PNG
+     * Clones SVG, removes debug layers, renders to canvas, downloads as PNG
+     */
+    async function exportAsPNG() {
+      try {
+        // Clone the SVG element
+        const svgClone = canvas.cloneNode(true);
+        
+        // Remove debug and UI layers from clone
+        const debugLayerClone = svgClone.querySelector('#debugLayer');
+        const graphDebugLayerClone = svgClone.querySelector('#graphDebugLayer');
+        const previewClone = svgClone.querySelector('#preview');
+        const fillTraceLayerClone = svgClone.querySelector('#fillTraceLayer');
+        const fillDebugLayerClone = svgClone.querySelector('#fillDebugLayer');
+        
+        if (debugLayerClone) debugLayerClone.remove();
+        if (graphDebugLayerClone) graphDebugLayerClone.remove();
+        if (previewClone) previewClone.remove();
+        if (fillTraceLayerClone) fillTraceLayerClone.remove();
+        if (fillDebugLayerClone) fillDebugLayerClone.remove();
+        
+        // Remove lines if they are hidden
+        if (!showLines) {
+          const linesClone = svgClone.querySelector('#lines');
+          if (linesClone) linesClone.remove();
+        }
+        
+        // Add inline styles to the clone so they are preserved in serialization
+        // Lines need stroke styles
+        const linesClone = svgClone.querySelector('#lines');
+        if (linesClone) {
+          const lineElements = linesClone.querySelectorAll('line');
+          lineElements.forEach(line => {
+            line.setAttribute('stroke', '#000000');
+            line.setAttribute('stroke-width', '1');
+            line.setAttribute('stroke-linecap', 'round');
+          });
+        }
+        
+        // Fills need opacity
+        const fillsClone = svgClone.querySelector('#fills');
+        if (fillsClone) {
+          const polygonElements = fillsClone.querySelectorAll('polygon');
+          polygonElements.forEach(polygon => {
+            polygon.setAttribute('stroke', 'none');
+            if (!polygon.hasAttribute('opacity')) {
+              polygon.setAttribute('opacity', '0.7');
+            }
+          });
+        }
+        
+        // Get current viewBox dimensions
+        const vb = canvas.viewBox.baseVal;
+        const width = vb.width;
+        const height = vb.height;
+        
+        // Use device pixel ratio for high-resolution export
+        const dpr = window.devicePixelRatio || 1;
+        const exportWidth = width * dpr;
+        const exportHeight = height * dpr;
+        
+        // Serialize SVG to string
+        const svgData = new XMLSerializer().serializeToString(svgClone);
+        const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+        const svgUrl = URL.createObjectURL(svgBlob);
+        
+        // Create offscreen canvas
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = exportWidth;
+        exportCanvas.height = exportHeight;
+        const ctx = exportCanvas.getContext('2d');
+        
+        // Scale for device pixel ratio
+        ctx.scale(dpr, dpr);
+        
+        // Draw canvas background
+        ctx.fillStyle = getComputedStyle(canvas).backgroundColor || '#ABABAB';
+        ctx.fillRect(0, 0, width, height);
+        
+        // Load and draw SVG
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, width, height);
+          URL.revokeObjectURL(svgUrl);
+          
+          // Convert to PNG blob
+          exportCanvas.toBlob((blob) => {
+            if (!blob) {
+              console.error('[Export] Failed to create PNG blob');
+              return;
+            }
+            
+            // Generate filename with timestamp
+            const now = new Date();
+            const timestamp = now.getFullYear() +
+              String(now.getMonth() + 1).padStart(2, '0') +
+              String(now.getDate()).padStart(2, '0') + '-' +
+              String(now.getHours()).padStart(2, '0') +
+              String(now.getMinutes()).padStart(2, '0') +
+              String(now.getSeconds()).padStart(2, '0');
+            const filename = `rustroke-${timestamp}.png`;
+            
+            // Trigger download
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+            
+            console.log(`[Export] PNG saved: ${filename}`);
+          }, 'image/png');
+        };
+        
+        img.onerror = () => {
+          URL.revokeObjectURL(svgUrl);
+          console.error('[Export] Failed to load SVG image');
+        };
+        
+        img.src = svgUrl;
+        
+      } catch (error) {
+        console.error('[Export] PNG export failed:', error);
       }
     }
 
@@ -1297,6 +1425,11 @@ async function main() {
       }, {source: "user"});
       
       console.log('[Frame] Added frame at viewBox boundaries', worldCorners);
+    });
+
+    // PNG Export button handler
+    exportPngBtn.addEventListener('click', () => {
+      exportAsPNG();
     });
 
     // Escape key handler - turn off fill, debug, and graph modes
