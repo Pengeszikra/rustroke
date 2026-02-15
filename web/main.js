@@ -28,6 +28,7 @@ async function main() {
     const debugBtn = document.getElementById('debugBtn');
     const graphDebugBtn = document.getElementById('graphDebugBtn');
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
+    const toggleLogBtn = document.getElementById('toggleLogBtn');
     const debugBadge = document.getElementById('debugBadge');
     const lineCounter = document.getElementById('lineCounter');
     const debugLayer = document.getElementById('debugLayer');
@@ -46,6 +47,7 @@ async function main() {
     let debugMode = false;
     let graphDebugMode = false;
     let showLines = true;
+    let showLog = true; // Log visibility (debug metrics)
     let isFilling = false; // GUARDRAIL: Re-entrancy lock
     
     // Recording/Playback state
@@ -97,6 +99,11 @@ async function main() {
       
       // Tool state
       currentTool: 'draw',
+      
+      // Operation tracking (freeze detection)
+      op: '-',              // Current operation (fill:start, fill:end, fill:ERR, etc.)
+      opTs: 0,              // Timestamp when operation started
+      opMs: 0,              // Duration of last completed operation
       
       // Error tracking
       lastJsError: 'NONE',
@@ -242,6 +249,15 @@ async function main() {
         }
         case "Fill": {
           const {x, y, color} = action.data;
+          
+          // INSTRUMENTATION: Mark fill start BEFORE calling WASM
+          metrics.op = 'fill:start';
+          metrics.opTs = performance.now();
+          updateDebugMetrics(); // Force metrics update
+          
+          // Force browser to paint so debug line shows "fill:start" BEFORE freeze
+          await new Promise(resolve => requestAnimationFrame(resolve));
+          
           const colorBytes = new TextEncoder().encode(color);
           const colorPtr = wasm.memory.buffer.byteLength - 256;
           const colorView = new Uint8Array(wasm.memory.buffer, colorPtr, colorBytes.length);
@@ -251,8 +267,25 @@ async function main() {
           // Check fills count before
           const fillsBefore = wasm.editor_fills_count();
           
-          // Use fill_debug_at which uses the fill graph system and creates the fill
-          wasm.editor_fill_debug_at(x, y);
+          const fillStartTime = performance.now();
+          eventRing.add(`fill:start x=${x.toFixed(0)} y=${y.toFixed(0)}`);
+          
+          try {
+            // Use fill_debug_at which uses the fill graph system and creates the fill
+            wasm.editor_fill_debug_at(x, y);
+            
+            const fillDuration = performance.now() - fillStartTime;
+            metrics.op = 'fill:end';
+            metrics.opMs = fillDuration;
+            eventRing.add(`fill:end ${fillDuration.toFixed(1)}ms`);
+          } catch (err) {
+            const fillDuration = performance.now() - fillStartTime;
+            metrics.op = 'fill:ERR';
+            metrics.opMs = fillDuration;
+            metrics.lastWasmError = `fill: ${err.message?.slice(0, 30) || 'unknown'}`;
+            eventRing.add(`fill:ERR ${err.message?.slice(0, 40) || 'unknown'}`);
+            throw err;
+          }
           
           // Check if fill was created
           const fillsAfter = wasm.editor_fills_count();
@@ -263,7 +296,7 @@ async function main() {
             fillMode = false;
             fillBtn.classList.remove('active');
             canvas.style.cursor = 'default';
-            console.log('[Fill] No area found, fill mode disabled');
+            eventRing.add('fill:abort no boundary');
           }
           
           renderFromWasm();
@@ -368,6 +401,7 @@ async function main() {
       const uiAge = metrics.lastRafTs ? Math.round(now - metrics.lastRafTs) : 0;
       const evtAge = metrics.lastEvtTs ? Math.round(now - metrics.lastEvtTs) : 0;
       const wasmAge = metrics.lastWasmOkTs ? Math.round(now - metrics.lastWasmOkTs) : 0;
+      const opAge = metrics.opTs ? Math.round(now - metrics.opTs) : 0;
       
       // Get point/segment count
       let points = 0;
@@ -384,6 +418,8 @@ async function main() {
       const line1 = [
         `pts:${points}`,
         `tool:${metrics.currentTool}`,
+        `op:${metrics.op}`,
+        `opAge:${opAge}ms`,
         `ptr:${metrics.pointerState}`,
         `move/s:${metrics.pointerMoveRate}`,
         `fps:${metrics.fps}`,
@@ -1563,6 +1599,15 @@ async function main() {
         type: "ToggleShowLines",
         data: {show: !showLines}
       }, {source: "user"});
+    });
+
+    toggleLogBtn.addEventListener('click', () => {
+      showLog = !showLog;
+      toggleLogBtn.classList.toggle('active');
+      const debugMetricsEl = document.getElementById('debugMetrics');
+      if (debugMetricsEl) {
+        debugMetricsEl.style.display = showLog ? 'inline-block' : 'none';
+      }
     });
 
     undoBtn.addEventListener('click', () => {
