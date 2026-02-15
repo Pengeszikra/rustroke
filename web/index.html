@@ -32,7 +32,7 @@
       left: 12px;
       right: 12px;
       z-index: 999;
-      background: rgba(66, 66, 66, 0.95);
+      background: rgba(35, 35, 35, 0.95);
       backdrop-filter: blur(8px);
       border-radius: 8px;
       padding: 12px 16px;
@@ -64,20 +64,8 @@
       color: #ABABAB;
       margin: 0;
       display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-    
-    .debug-badge {
-      display: inline-block;
-      background: #ef4444;
-      color: white;
-      padding: 2px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
+      flex-direction: column;
+      gap: 6px;
     }
     
     #fillMetrics {
@@ -110,7 +98,7 @@
     }
     button:hover { background: var(--accent-dark); }
     button.active {
-      background: #ef4444;
+      background: #4379a3;
       color: white;
     }
     input[type="color"] {
@@ -205,10 +193,9 @@
     <!-- Top row: title + status + metrics -->
     <div class="toolbar-top">
       <h1>rustroke</h1>
-      <span class="debug-badge" id="debugBadge">DEBUG</span>
       <div id="status">
         <span id="lineCounter">Lines: 0</span>
-        <span id="debugMetrics" style="font-family: monospace; font-size: 10px; color: #888;">
+        <span id="debugMetrics" style="font-family: monospace; font-size: 11px; color: #999; white-space: pre-line; line-height: 1.4;">
           pts:0 tool:- ptr:- move/s:0 fps:0 dt:0ms long:0 wasm/s:0 mem:0pg err:-
         </span>
       </div>

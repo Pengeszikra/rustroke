@@ -71,6 +71,7 @@ async function main() {
       lastPressure: -1,
       lastPointerType: '-',
       pointerState: 'up',
+      lastEvtType: '-',
       
       // Frame timing
       lastFrameTime: 0,
@@ -87,10 +88,12 @@ async function main() {
       lastWasmDuration: 0,
       maxWasmDuration: 0,
       lastWasmError: 'NONE',
+      wasmSpikeCount: 0,
       
-      // Watchdog
-      uiTick: 0,
-      wasmTick: 0,
+      // Watchdog timestamps
+      lastRafTs: 0,
+      lastEvtTs: 0,
+      lastWasmOkTs: 0,
       
       // Tool state
       currentTool: 'draw',
@@ -116,6 +119,22 @@ async function main() {
       lastResetTime: 0
     };
 
+    // Event ring buffer for debugging (last 40 events)
+    const eventRing = {
+      buffer: [],
+      maxSize: 40,
+      add(msg) {
+        const entry = `[${Math.round(performance.now())}] ${msg}`;
+        this.buffer.push(entry);
+        if (this.buffer.length > this.maxSize) {
+          this.buffer.shift();
+        }
+      },
+      getLast(n) {
+        return this.buffer.slice(-n);
+      }
+    };
+
     // Wrap WASM calls for instrumentation
     let wasmRaw = null; // Store raw WASM module
     const wasmWrapper = {
@@ -128,13 +147,24 @@ async function main() {
             const result = fn(...args);
             const duration = performance.now() - start;
             metrics.lastWasmDuration = duration;
+            
             if (duration > metrics.maxWasmDuration) {
               metrics.maxWasmDuration = duration;
             }
-            metrics.wasmTick = performance.now();
+            
+            // Track spikes (>50ms)
+            if (duration > 50) {
+              metrics.wasmSpikeCount++;
+              eventRing.add(`WARN wasm spike ${name} ${duration.toFixed(1)}ms`);
+            }
+            
+            metrics.lastWasmOkTs = performance.now();
+            eventRing.add(`WASM ${name} ok ${duration.toFixed(1)}ms`);
             return result;
           } catch (error) {
+            const duration = performance.now() - start;
             metrics.lastWasmError = `${name}: ${error.message?.slice(0, 30) || 'unknown'}`;
+            eventRing.add(`ERR WASM ${name} failed: ${error.message?.slice(0, 40) || 'unknown'}`);
             throw error;
           }
         };
@@ -144,10 +174,12 @@ async function main() {
     // Global error handlers
     window.addEventListener('error', (evt) => {
       metrics.lastJsError = evt.message?.slice(0, 50) || 'unknown';
+      eventRing.add(`ERR JS: ${evt.message?.slice(0, 60) || 'unknown'}`);
     });
     
     window.addEventListener('unhandledrejection', (evt) => {
       metrics.lastJsError = `Promise: ${evt.reason?.message?.slice(0, 40) || 'unknown'}`;
+      eventRing.add(`ERR Promise: ${evt.reason?.message?.slice(0, 50) || 'unknown'}`);
     });
 
     /**
@@ -310,10 +342,7 @@ async function main() {
     }
 
     /**
-     * Update fill metrics display from WASM stats
-     */
-    /**
-     * Update debug metrics display (always-on instrumentation)
+     * Update debug metrics display (always-on instrumentation with freeze detection)
      */
     function updateDebugMetrics() {
       const debugMetricsEl = document.getElementById('debugMetrics');
@@ -334,10 +363,11 @@ async function main() {
         jsHeap = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(1) + 'M';
       }
       
-      // Calculate watchdog ages
+      // Calculate watchdog ages (FREEZE DETECTION)
       const now = performance.now();
-      const uiAge = metrics.uiTick ? Math.round(now - metrics.uiTick) : 0;
-      const wasmAge = metrics.wasmTick ? Math.round(now - metrics.wasmTick) : 0;
+      const uiAge = metrics.lastRafTs ? Math.round(now - metrics.lastRafTs) : 0;
+      const evtAge = metrics.lastEvtTs ? Math.round(now - metrics.lastEvtTs) : 0;
+      const wasmAge = metrics.lastWasmOkTs ? Math.round(now - metrics.lastWasmOkTs) : 0;
       
       // Get point/segment count
       let points = 0;
@@ -345,8 +375,13 @@ async function main() {
         points = wasm.editor_line_count();
       }
       
-      // Build compact metrics string
-      const parts = [
+      // Format last event type with pointer ID
+      const lastEvt = metrics.lastEvtType !== '-' 
+        ? `${metrics.lastEvtType}#${metrics.lastPointerId}` 
+        : '-';
+      
+      // Build multiline metrics string with freeze detection fields
+      const line1 = [
         `pts:${points}`,
         `tool:${metrics.currentTool}`,
         `ptr:${metrics.pointerState}`,
@@ -354,14 +389,27 @@ async function main() {
         `fps:${metrics.fps}`,
         `dt:${metrics.frameDt}ms`,
         `long:${metrics.longFrameCount}`,
-        `wasm/s:${metrics.wasmCallsPerSec}`,
-        `last:${metrics.lastWasmCall}`,
+        `wasm/s:${metrics.wasmCallsPerSec}`
+      ].join(' ');
+      
+      const line2 = [
+        `uiAge:${uiAge}ms`,
+        `evtAge:${evtAge}ms`,
+        `wasmAge:${wasmAge}ms`,
+        `lastEvt:${lastEvt}`,
+        `lastWasm:${metrics.lastWasmCall}`,
+        `lastWasmMs:${metrics.lastWasmDuration.toFixed(1)}`,
+        `maxWasmMs:${metrics.maxWasmDuration.toFixed(1)}`,
+        `spikes:${metrics.wasmSpikeCount}`
+      ].join(' ');
+      
+      const line3 = [
         `mem:${memPages}pg/${memBytes}`,
         `heap:${jsHeap}`,
         `err:${metrics.lastWasmError !== 'NONE' ? metrics.lastWasmError : (metrics.lastJsError !== 'NONE' ? metrics.lastJsError : '-')}`
-      ];
+      ].join(' ');
       
-      debugMetricsEl.textContent = parts.join(' ');
+      debugMetricsEl.textContent = `${line1}\n${line2}\n${line3}`;
     }
 
     /**
@@ -1304,7 +1352,7 @@ async function main() {
       evt.preventDefault();
       if (!wasm) return;
       
-      // Track metrics
+      // Track metrics + freeze detection
       metrics.pointerDownCount++;
       metrics.lastPointerId = evt.pointerId;
       metrics.lastX = evt.clientX;
@@ -1313,9 +1361,13 @@ async function main() {
       metrics.lastPointerType = evt.pointerType || '-';
       metrics.pointerState = 'down';
       metrics.currentTool = fillMode ? 'fill' : 'draw';
+      metrics.lastEvtType = 'pdown';
+      metrics.lastEvtTs = performance.now();
+      
+      const point = toSvgPoint(evt);
+      eventRing.add(`EVT pdown id=${evt.pointerId} x=${point.x.toFixed(0)} y=${point.y.toFixed(0)}`);
       
       canvas.setPointerCapture(evt.pointerId);
-      const point = toSvgPoint(evt);
 
       if (fillMode) {
         // Stay in fill mode after filling
@@ -1343,11 +1395,14 @@ async function main() {
      * @param {PointerEvent} evt
      */
     canvas.addEventListener('pointermove', (evt) => {
-      // Track metrics
+      // Track metrics + freeze detection
       metrics.pointerMoveCount++;
       metrics.lastX = evt.clientX;
       metrics.lastY = evt.clientY;
       metrics.lastPressure = evt.pressure >= 0 ? evt.pressure : -1;
+      metrics.lastPointerId = evt.pointerId;
+      metrics.lastEvtType = 'pmove';
+      metrics.lastEvtTs = performance.now();
       
       const pos = toSvgPoint(evt);
       
@@ -1417,9 +1472,13 @@ async function main() {
     }
 
     canvas.addEventListener('pointerup', endDrag);
-    canvas.addEventListener('pointercancel', () => {
+    canvas.addEventListener('pointercancel', (evt) => {
       metrics.pointerCancelCount++;
       metrics.pointerState = 'cancel';
+      metrics.lastEvtType = 'pcancel';
+      metrics.lastEvtTs = performance.now();
+      metrics.lastPointerId = evt.pointerId;
+      eventRing.add(`EVT pcancel id=${evt.pointerId}`);
       dragging = false;
       preview.classList.remove('active');
     });
@@ -1441,6 +1500,9 @@ async function main() {
     function endDrag(evt) {
       metrics.pointerUpCount++;
       metrics.pointerState = 'up';
+      metrics.lastEvtType = 'pup';
+      metrics.lastEvtTs = performance.now();
+      metrics.lastPointerId = evt.pointerId;
       
       if (!dragging || !wasm) return;
       dragging = false;
@@ -1632,7 +1694,7 @@ async function main() {
   
   function metricsLoop() {
     const now = performance.now();
-    metrics.uiTick = now;
+    metrics.lastRafTs = now; // FREEZE DETECTION: UI thread heartbeat
     
     // Fast tick (every frame): timing and FPS
     const dt = metrics.lastFrameTime ? now - metrics.lastFrameTime : 16.7;
@@ -1641,6 +1703,7 @@ async function main() {
     
     if (dt > 50) {
       metrics.longFrameCount++;
+      eventRing.add(`WARN long frame ${dt.toFixed(0)}ms`);
     }
     
     // Rolling FPS calculation
