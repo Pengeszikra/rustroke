@@ -30,12 +30,6 @@ async function main() {
     const toggleLinesBtn = document.getElementById('toggleLinesBtn');
     const debugBadge = document.getElementById('debugBadge');
     const lineCounter = document.getElementById('lineCounter');
-    const fillMetrics = document.getElementById('fillMetrics');
-    const metricSteps = document.getElementById('metricSteps');
-    const metricStates = document.getElementById('metricStates');
-    const metricMs = document.getElementById('metricMs');
-    const metricCandMax = document.getElementById('metricCandMax');
-    const metricAbort = document.getElementById('metricAbort');
     const debugLayer = document.getElementById('debugLayer');
     const debugNearestLine = document.getElementById('debugNearestLine');
     const debugNearestPoint = document.getElementById('debugNearestPoint');
@@ -63,6 +57,98 @@ async function main() {
     
     /** @type {{x: number, y: number}} */
     let startPoint = { x: 0, y: 0 };
+
+    // ==== DEBUG METRICS COLLECTOR ====
+    const metrics = {
+      // Pointer events
+      pointerMoveCount: 0,
+      pointerDownCount: 0,
+      pointerUpCount: 0,
+      pointerCancelCount: 0,
+      lastPointerId: -1,
+      lastX: 0,
+      lastY: 0,
+      lastPressure: -1,
+      lastPointerType: '-',
+      pointerState: 'up',
+      
+      // Frame timing
+      lastFrameTime: 0,
+      frameDt: 0,
+      frameDtSum: 0,
+      frameCount: 0,
+      fps: 0,
+      longFrameCount: 0,
+      
+      // WASM call tracking
+      wasmCallCount: 0,
+      wasmCallsPerSec: 0,
+      lastWasmCall: '-',
+      lastWasmDuration: 0,
+      maxWasmDuration: 0,
+      lastWasmError: 'NONE',
+      
+      // Watchdog
+      uiTick: 0,
+      wasmTick: 0,
+      
+      // Tool state
+      currentTool: 'draw',
+      
+      // Error tracking
+      lastJsError: 'NONE',
+      
+      // Reset counters (for per-second rates)
+      reset() {
+        const now = performance.now();
+        if (!this.lastResetTime) this.lastResetTime = now;
+        const dt = now - this.lastResetTime;
+        if (dt >= 1000) {
+          this.pointerMoveRate = Math.round((this.pointerMoveCount / dt) * 1000);
+          this.wasmCallsPerSec = Math.round((this.wasmCallCount / dt) * 1000);
+          this.pointerMoveCount = 0;
+          this.wasmCallCount = 0;
+          this.lastResetTime = now;
+        }
+      },
+      
+      pointerMoveRate: 0,
+      lastResetTime: 0
+    };
+
+    // Wrap WASM calls for instrumentation
+    let wasmRaw = null; // Store raw WASM module
+    const wasmWrapper = {
+      _wrapCall(name, fn) {
+        return (...args) => {
+          const start = performance.now();
+          metrics.wasmCallCount++;
+          metrics.lastWasmCall = name;
+          try {
+            const result = fn(...args);
+            const duration = performance.now() - start;
+            metrics.lastWasmDuration = duration;
+            if (duration > metrics.maxWasmDuration) {
+              metrics.maxWasmDuration = duration;
+            }
+            metrics.wasmTick = performance.now();
+            return result;
+          } catch (error) {
+            metrics.lastWasmError = `${name}: ${error.message?.slice(0, 30) || 'unknown'}`;
+            throw error;
+          }
+        };
+      }
+    };
+
+    // Global error handlers
+    window.addEventListener('error', (evt) => {
+      metrics.lastJsError = evt.message?.slice(0, 50) || 'unknown';
+    });
+    
+    window.addEventListener('unhandledrejection', (evt) => {
+      metrics.lastJsError = `Promise: ${evt.reason?.message?.slice(0, 40) || 'unknown'}`;
+    });
 
     /**
      * Central action dispatcher
@@ -150,9 +236,8 @@ async function main() {
           
           renderFromWasm();
           
-          // Update fill metrics if debug mode is on
+          // Update debug visuals if debug mode is on
           if (debugMode) {
-            updateFillMetrics();
             renderFillTrace();
             renderFillDebug();
           }
@@ -227,47 +312,56 @@ async function main() {
     /**
      * Update fill metrics display from WASM stats
      */
-    function updateFillMetrics() {
-      if (!wasm) return;
+    /**
+     * Update debug metrics display (always-on instrumentation)
+     */
+    function updateDebugMetrics() {
+      const debugMetricsEl = document.getElementById('debugMetrics');
+      if (!debugMetricsEl) return;
       
-      // Try to read fill stats if available
-      if (typeof wasm.editor_fill_stats_ptr_f32 === 'function' && 
-          typeof wasm.editor_fill_stats_len_f32 === 'function') {
-        const len = wasm.editor_fill_stats_len_f32();
-        const ptr = wasm.editor_fill_stats_ptr_f32();
-        
-        if (len >= 5 && ptr) {
-          const stats = new Float32Array(wasm.memory.buffer, ptr, 5);
-          const ok = stats[0];
-          const steps = Math.round(stats[1]);
-          const uniqueStates = Math.round(stats[2]);
-          const candMax = Math.round(stats[3]);
-          const abortCode = Math.round(stats[4]);
-          
-          metricSteps.textContent = steps;
-          metricStates.textContent = uniqueStates;
-          metricMs.textContent = '~' + Math.round(steps / 100); // Estimate: ~100 steps/ms
-          metricCandMax.textContent = candMax;
-          
-          const abortReasons = ['NONE', 'MAX_STEPS', 'REPEAT_STATE', 'NO_PROGRESS', 'DEAD_END', 'TIME_BUDGET'];
-          metricAbort.textContent = abortReasons[abortCode] || 'UNKNOWN';
-          metricAbort.style.color = (ok === 1.0) ? '#4ade80' : '#f87171';
-        } else {
-          // No stats available - show placeholder
-          metricSteps.textContent = '?';
-          metricStates.textContent = '?';
-          metricMs.textContent = '?';
-          metricCandMax.textContent = '?';
-          metricAbort.textContent = 'N/A';
-        }
-      } else {
-        // Stats exports not available - show placeholder
-        metricSteps.textContent = 'n/a';
-        metricStates.textContent = 'n/a';
-        metricMs.textContent = 'n/a';
-        metricCandMax.textContent = 'n/a';
-        metricAbort.textContent = 'n/a';
+      // Get WASM memory info
+      let memPages = 'n/a';
+      let memBytes = 'n/a';
+      if (wasm && wasm.memory) {
+        const pages = wasm.memory.buffer.byteLength / 65536;
+        memPages = Math.round(pages);
+        memBytes = (wasm.memory.buffer.byteLength / 1024).toFixed(0) + 'k';
       }
+      
+      // Get JS heap if available
+      let jsHeap = 'n/a';
+      if (performance.memory && performance.memory.usedJSHeapSize) {
+        jsHeap = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(1) + 'M';
+      }
+      
+      // Calculate watchdog ages
+      const now = performance.now();
+      const uiAge = metrics.uiTick ? Math.round(now - metrics.uiTick) : 0;
+      const wasmAge = metrics.wasmTick ? Math.round(now - metrics.wasmTick) : 0;
+      
+      // Get point/segment count
+      let points = 0;
+      if (wasm && typeof wasm.editor_line_count === 'function') {
+        points = wasm.editor_line_count();
+      }
+      
+      // Build compact metrics string
+      const parts = [
+        `pts:${points}`,
+        `tool:${metrics.currentTool}`,
+        `ptr:${metrics.pointerState}`,
+        `move/s:${metrics.pointerMoveRate}`,
+        `fps:${metrics.fps}`,
+        `dt:${metrics.frameDt}ms`,
+        `long:${metrics.longFrameCount}`,
+        `wasm/s:${metrics.wasmCallsPerSec}`,
+        `last:${metrics.lastWasmCall}`,
+        `mem:${memPages}pg/${memBytes}`,
+        `heap:${jsHeap}`,
+        `err:${metrics.lastWasmError !== 'NONE' ? metrics.lastWasmError : (metrics.lastJsError !== 'NONE' ? metrics.lastJsError : '-')}`
+      ];
+      
+      debugMetricsEl.textContent = parts.join(' ');
     }
 
     /**
@@ -1209,6 +1303,17 @@ async function main() {
     canvas.addEventListener('pointerdown', (evt) => {
       evt.preventDefault();
       if (!wasm) return;
+      
+      // Track metrics
+      metrics.pointerDownCount++;
+      metrics.lastPointerId = evt.pointerId;
+      metrics.lastX = evt.clientX;
+      metrics.lastY = evt.clientY;
+      metrics.lastPressure = evt.pressure >= 0 ? evt.pressure : -1;
+      metrics.lastPointerType = evt.pointerType || '-';
+      metrics.pointerState = 'down';
+      metrics.currentTool = fillMode ? 'fill' : 'draw';
+      
       canvas.setPointerCapture(evt.pointerId);
       const point = toSvgPoint(evt);
 
@@ -1238,6 +1343,12 @@ async function main() {
      * @param {PointerEvent} evt
      */
     canvas.addEventListener('pointermove', (evt) => {
+      // Track metrics
+      metrics.pointerMoveCount++;
+      metrics.lastX = evt.clientX;
+      metrics.lastY = evt.clientY;
+      metrics.lastPressure = evt.pressure >= 0 ? evt.pressure : -1;
+      
       const pos = toSvgPoint(evt);
       
       // Update debug overlay anytime if enabled (not just during drawing)
@@ -1306,7 +1417,13 @@ async function main() {
     }
 
     canvas.addEventListener('pointerup', endDrag);
-    canvas.addEventListener('pointercancel', () => { dragging = false; preview.classList.remove('active'); });
+    canvas.addEventListener('pointercancel', () => {
+      metrics.pointerCancelCount++;
+      metrics.pointerState = 'cancel';
+      dragging = false;
+      preview.classList.remove('active');
+    });
+    
     canvas.addEventListener('pointerleave', () => {
       dragging = false;
       preview.classList.remove('active');
@@ -1322,6 +1439,9 @@ async function main() {
      * @param {PointerEvent} evt
      */
     function endDrag(evt) {
+      metrics.pointerUpCount++;
+      metrics.pointerState = 'up';
+      
       if (!dragging || !wasm) return;
       dragging = false;
       preview.classList.remove('active');
@@ -1462,8 +1582,22 @@ async function main() {
 
   // Load and initialize WASM module
   console.log('[WASM] Loading module...');
-  wasm = await initWasm();
+  wasmRaw = await initWasm();
   console.log('[WASM] Module loaded successfully');
+  
+  // Create wrapper object with instrumented functions
+  wasm = { memory: wasmRaw.memory };
+  
+  // Wrap all editor_* functions for instrumentation
+  for (const key in wasmRaw) {
+    const value = wasmRaw[key];
+    if (typeof value === 'function' && key.startsWith('editor_')) {
+      wasm[key] = wasmWrapper._wrapCall(key, value.bind(wasmRaw));
+    } else {
+      // Copy non-function properties as-is
+      wasm[key] = value;
+    }
+  }
   
   wasm.editor_init();
   
@@ -1492,6 +1626,46 @@ async function main() {
   window.addEventListener('resize', updateViewBox);
   
   renderFromWasm();
+  
+  // Start metrics update loops
+  let lastSlowUpdate = 0;
+  
+  function metricsLoop() {
+    const now = performance.now();
+    metrics.uiTick = now;
+    
+    // Fast tick (every frame): timing and FPS
+    const dt = metrics.lastFrameTime ? now - metrics.lastFrameTime : 16.7;
+    metrics.frameDt = Math.round(dt);
+    metrics.lastFrameTime = now;
+    
+    if (dt > 50) {
+      metrics.longFrameCount++;
+    }
+    
+    // Rolling FPS calculation
+    metrics.frameDtSum += dt;
+    metrics.frameCount++;
+    if (metrics.frameCount >= 10) {
+      const avgDt = metrics.frameDtSum / metrics.frameCount;
+      metrics.fps = Math.round(1000 / avgDt);
+      metrics.frameDtSum = 0;
+      metrics.frameCount = 0;
+    }
+    
+    // Reset per-second counters
+    metrics.reset();
+    
+    // Slow tick (every 250ms): update display and heavier metrics
+    if (now - lastSlowUpdate > 250) {
+      updateDebugMetrics();
+      lastSlowUpdate = now;
+    }
+    
+    requestAnimationFrame(metricsLoop);
+  }
+  
+  requestAnimationFrame(metricsLoop);
   
   console.log('[Rustroke] Ready!');
 
